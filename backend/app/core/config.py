@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     evaluation_reminder_minutes_before: int = 60
     confirmation_reminder_hours_before: int = 12
     cors_origins: list[str] = ["http://localhost:4200"]
+    cors_origin_regex: str | None = r"^http://(localhost|127\.0\.0\.1):\d+$"
 
     @model_validator(mode="after")
     def _check_secret(self) -> "Settings":

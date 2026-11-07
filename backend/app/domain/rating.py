@@ -67,9 +67,33 @@ def compute_average(attributes: dict[str, float], keys: tuple[str, ...] | None =
     return sum(float(attributes[k]) for k in keys) / len(keys)
 
 
-def compute_tier(average: float) -> str:
+Thresholds = tuple[tuple[str, float], ...]
+
+
+def thresholds_from_dict(data: dict[str, float]) -> Thresholds:
+    """{"S": 4.5, "A": 3.75, "B": 3.0, "C": 2.0} → limites em ordem decrescente (D sempre começa em 0)."""
+    return tuple((t, float(data[t])) for t in TIER_ORDER[:-1]) + (("D", 0.0),)
+
+
+def thresholds_to_dict(thresholds: Thresholds) -> dict[str, float]:
+    return {t: m for t, m in thresholds if t != "D"}
+
+
+def validate_thresholds(data: dict[str, float]) -> dict[str, float]:
+    expected = set(TIER_ORDER[:-1])
+    if set(data) != expected:
+        raise ValueError(f"Informe a média mínima de {', '.join(TIER_ORDER[:-1])}")
+    values = [float(data[t]) for t in TIER_ORDER[:-1]]
+    if not all(MIN_SCORE < v <= MAX_SCORE for v in values):
+        raise ValueError("As médias mínimas devem estar entre 0 e 5")
+    if any(a <= b for a, b in zip(values, values[1:], strict=False)):
+        raise ValueError("Cada Tier precisa de média mínima maior que a do Tier abaixo (S > A > B > C)")
+    return {t: float(data[t]) for t in TIER_ORDER[:-1]}
+
+
+def compute_tier(average: float, thresholds: Thresholds | None = None) -> str:
     value = round(average, _TIER_PRECISION)
-    for tier, minimum in TIER_THRESHOLDS:
+    for tier, minimum in thresholds or TIER_THRESHOLDS:
         if value >= minimum:
             return tier
     return "D"

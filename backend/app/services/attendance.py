@@ -328,9 +328,34 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
                 p.notes = None
         elif status == S.ABSENT:
             p = db.scalar(select(Payment).where(Payment.match_id == match.id, Payment.member_id == member_id))
-            if p is not None and p.status == PaymentStatus.PENDING and p.amount_paid == 0:
+            if group.charge_no_shows and mp.was_confirmed and match.price > 0:
+                # regra do grupo: quem confirmou e faltou paga a pelada mesmo assim
+                if p is None:
+                    p, _ = payments.ensure_charge(db, match, member_id)
+                    p.notes = NO_SHOW_NOTE
+                    payments_created += 1
+                    new_payment_users.append(member.user_id)
+                elif p.status == PaymentStatus.REFUNDED and p.notes == payments_auto_note():
+                    p.status = PaymentStatus.PENDING
+                    p.notes = NO_SHOW_NOTE
+            elif p is not None and p.status == PaymentStatus.PENDING and p.amount_paid == 0:
                 p.status = PaymentStatus.REFUNDED
                 p.notes = payments_auto_note()
+
+    db.flush()  # autoflush desligado: as consultas abaixo precisam ver as marcações acima
+    if group.charge_late_cancellations and match.price > 0:
+        late = db.scalars(
+            select(MatchPlayer).where(
+                MatchPlayer.match_id == match.id, MatchPlayer.status == S.CANCELLED,
+                MatchPlayer.late_cancellation.is_(True),
+            )
+        ).all()
+        for mp in late:
+            p, created = payments.ensure_charge(db, match, mp.member_id)
+            if created:
+                p.notes = LATE_CANCEL_NOTE
+                payments_created += 1
+                new_payment_users.append(mp.member.user_id)
 
     unmarked = db.scalars(
         select(MatchPlayer).where(MatchPlayer.match_id == match.id, MatchPlayer.status == S.CONFIRMED)
@@ -361,7 +386,7 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
         match.evaluation_status = EvaluationStatus.OPEN
         notifications.notify(
             db, present_users, NotificationType.EVALUATION_OPEN, f"Avalie a pelada {match.name}",
-            f"As avaliações ficam abertas até {closes.strftime('%d/%m %H:%M UTC')}.",
+            f"As avaliações ficam abertas até {notifications.when(closes)}.",
             group_id=group.id, match_id=match.id,
         )
     if new_payment_users:
@@ -373,6 +398,10 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
                  group_id=group.id, after={"changes": changes, "ended_at": match.ended_at})
     db.commit()
     return match, payments_created, warnings
+
+
+NO_SHOW_NOTE = "Falta sem aviso (regra do grupo)"
+LATE_CANCEL_NOTE = "Desistência fora do prazo (regra do grupo)"
 
 
 def payments_auto_note() -> str:
@@ -387,7 +416,9 @@ def attendance_stats(db: Session, member_id: int) -> dict:
     ).all()
     present = sum(1 for r in rows if r.status == S.PRESENT)
     absent = sum(1 for r in rows if r.status == S.ABSENT)
+    no_shows = sum(1 for r in rows if r.status == S.ABSENT and r.was_confirmed)
     return {
+        "no_shows": no_shows,
         "matches_played": present,
         "present": present,
         "absent": absent,

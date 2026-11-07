@@ -14,6 +14,7 @@ def _default_draw_weights() -> dict:
 
 class FootballGroup(Base):
     __tablename__ = "football_groups"
+    __table_args__ = (UniqueConstraint("public_token", name="uq_groups_public_token"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120))
@@ -21,6 +22,9 @@ class FootballGroup(Base):
     modality: Mapped[Modality] = mapped_column(str_enum(Modality), default=Modality.SOCIETY)
     invite_token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # suspensão pela administração da plataforma: o grupo fica inativo e somente leitura até ser reativado
+    suspended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    suspension_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- regras do grupo
     require_join_approval: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -43,6 +47,14 @@ class FootballGroup(Base):
 
     # --- parâmetros do sorteio
     draw_weights: Mapped[dict] = mapped_column(JSON, default=_default_draw_weights)
+
+    # --- penalidades por falta (PRD §20.1: decisão configurável pelo grupo)
+    charge_no_shows: Mapped[bool] = mapped_column(Boolean, default=False)  # confirmou e faltou: paga
+    charge_late_cancellations: Mapped[bool] = mapped_column(Boolean, default=False)  # desistiu fora do prazo: paga
+
+    # --- ranking público (link sem login, somente estatísticas de jogo)
+    public_ranking_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    public_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

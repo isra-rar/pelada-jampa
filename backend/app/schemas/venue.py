@@ -1,0 +1,367 @@
+"""Espaços esportivos: cadastro, agenda, vínculo com grupos, aluguel e painel do dono."""
+
+import re
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+from app.domain.enums import MatchStatus, Modality, RentStatus, VenueLinkOrigin, VenueLinkStatus, VenueRole
+from app.schemas.common import ORMModel
+
+_HHMM = re.compile(r"^(([01]\d|2[0-3]):[0-5]\d|24:00)$")
+
+OpeningHours = dict[str, list[str] | None]
+
+
+def validate_opening_hours(v: OpeningHours | None) -> OpeningHours | None:
+    """Chaves "0" (segunda) a "6" (domingo); valor [abre, fecha] em HH:MM local ou vazio para fechado."""
+    if v is None:
+        return v
+    out: OpeningHours = {}
+    for key, interval in v.items():
+        if key not in {str(d) for d in range(7)}:
+            raise ValueError("Use os dias 0 (segunda) a 6 (domingo)")
+        if not interval:
+            continue  # fechado
+        if len(interval) != 2 or not all(_HHMM.match(t or "") for t in interval):
+            raise ValueError("Horário no formato HH:MM, ex.: [\"08:00\", \"23:00\"]")
+        if interval[0] >= interval[1]:
+            raise ValueError("O horário de fechamento deve ser depois da abertura")
+        out[key] = [interval[0], interval[1]]
+    return out
+
+
+class VenueCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    address: str | None = Field(default=None, max_length=300)
+    phone: str | None = Field(default=None, max_length=30)
+    opening_hours: OpeningHours | None = None
+
+    _hours = field_validator("opening_hours")(validate_opening_hours)
+
+
+class VenueUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    address: str | None = Field(default=None, max_length=300)
+    phone: str | None = Field(default=None, max_length=30)
+    opening_hours: OpeningHours | None = None
+    is_active: bool | None = None  # só o dono
+
+    _hours = field_validator("opening_hours")(validate_opening_hours)
+
+
+class CourtIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    modality: Modality = Modality.SOCIETY
+    hourly_price: Decimal = Field(default=Decimal("0"), ge=0, max_digits=10, decimal_places=2)
+
+
+class CourtUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    modality: Modality | None = None
+    hourly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    is_active: bool | None = None
+
+
+class CourtOut(ORMModel):
+    id: int
+    venue_id: int
+    name: str
+    modality: Modality
+    hourly_price: Decimal
+    is_active: bool
+
+
+class VenueOut(BaseModel):
+    """Visão da equipe do espaço."""
+
+    id: int
+    name: str
+    description: str | None
+    address: str | None
+    phone: str | None
+    opening_hours: OpeningHours
+    is_active: bool
+    link_code: str  # informado pelos administradores de grupos para pedir vínculo
+    created_at: datetime
+    courts: list[CourtOut]
+    my_role: VenueRole
+
+
+class VenuePublicOut(BaseModel):
+    """O que os membros de um grupo vinculado veem do espaço."""
+
+    id: int
+    name: str
+    address: str | None
+    phone: str | None
+    opening_hours: OpeningHours
+    courts: list[CourtOut]
+
+
+class StaffIn(BaseModel):
+    email: EmailStr
+    name: str = Field(min_length=2, max_length=120)
+    role: VenueRole = VenueRole.MANAGER
+
+
+class StaffUpdate(BaseModel):
+    role: VenueRole | None = None
+    is_active: bool | None = None
+
+
+class StaffOut(BaseModel):
+    id: int
+    user_id: int
+    name: str
+    email: str
+    role: VenueRole
+    is_active: bool
+    created_at: datetime
+
+
+class BlockIn(BaseModel):
+    court_id: int
+    starts_at: datetime
+    ends_at: datetime
+    reason: str = Field(min_length=2, max_length=200)
+
+
+class BlockOut(ORMModel):
+    id: int
+    court_id: int
+    starts_at: datetime
+    ends_at: datetime
+    reason: str
+
+
+# ------------------------------------------------------------------ agenda
+
+
+class TimeRange(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+
+
+class CalendarItem(BaseModel):
+    kind: Literal["match", "block"]
+    id: int
+    starts_at: datetime
+    ends_at: datetime
+    title: str
+    group_id: int | None = None
+    group_name: str | None = None
+    match_status: MatchStatus | None = None
+    confirmed: int | None = None
+    slots: int | None = None
+    series_id: int | None = None
+    mine: bool = False  # visão do grupo: pelada do próprio grupo
+
+
+class CalendarCourtDay(BaseModel):
+    court_id: int
+    items: list[CalendarItem]
+    free: list[TimeRange]
+
+
+class CalendarDay(BaseModel):
+    date: date
+    opens_at: datetime | None  # None = fechado
+    closes_at: datetime | None
+    courts: list[CalendarCourtDay]
+
+
+class CalendarOut(BaseModel):
+    start: date
+    days: int
+    courts: list[CourtOut]
+    schedule: list[CalendarDay]
+
+
+# ------------------------------------------------------------------ vínculo com grupos
+
+
+class GroupAdminContact(BaseModel):
+    name: str
+    email: str
+    phone: str | None
+
+
+class VenueGroupOut(BaseModel):
+    id: int  # id do vínculo
+    venue_id: int
+    venue_name: str
+    group_id: int
+    group_name: str
+    status: VenueLinkStatus
+    origin: VenueLinkOrigin
+    rent_hourly_price: Decimal | None
+    message: str | None
+    created_at: datetime
+    decided_at: datetime | None
+    ended_at: datetime | None
+    admins: list[GroupAdminContact]
+    active_members: int
+    next_match_at: datetime | None
+    rent_pending: Decimal
+
+
+class VenueGroupCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    modality: Modality = Modality.SOCIETY
+    admin_email: EmailStr
+    admin_name: str = Field(min_length=2, max_length=120)
+    rent_hourly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+
+
+class VenueGroupUpdate(BaseModel):
+    rent_hourly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+
+
+class VenueGroupAdminIn(BaseModel):
+    email: EmailStr
+    name: str = Field(min_length=2, max_length=120)
+    replace: bool = Field(default=False, description="Tira o papel de administrador dos demais")
+
+
+class LinkRequestIn(BaseModel):
+    code: str = Field(min_length=4, max_length=16)
+    message: str | None = Field(default=None, max_length=300)
+
+
+class GroupVenueOut(BaseModel):
+    """Espaço do grupo, visto pelos membros."""
+
+    link_id: int | None = None
+    status: VenueLinkStatus | None = None
+    origin: VenueLinkOrigin | None = None
+    venue: VenuePublicOut | None = None
+    rent_hourly_price: Decimal | None = None  # apenas administradores
+
+
+# ------------------------------------------------------------------ aluguel
+
+
+class RentChargeOut(BaseModel):
+    id: int
+    venue_id: int
+    venue_name: str
+    court_id: int
+    court_name: str
+    group_id: int
+    group_name: str
+    match_id: int
+    match_name: str
+    match_starts_at: datetime
+    amount: Decimal
+    status: RentStatus
+    reported_paid_at: datetime | None
+    paid_at: datetime | None
+    method: str | None
+    notes: str | None
+
+
+class RentChargeUpdate(BaseModel):
+    status: RentStatus | None = None
+    amount: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    method: str | None = Field(default=None, max_length=40)
+    notes: str | None = Field(default=None, max_length=300)
+
+
+class RentSettleIn(BaseModel):
+    charge_ids: list[int] = Field(min_length=1, max_length=200)
+    method: str | None = Field(default=None, max_length=40)
+
+
+class RentGroupSummary(BaseModel):
+    group_id: int
+    group_name: str
+    charges: int
+    amount: Decimal
+    paid: Decimal
+    pending: Decimal
+    reported: int  # pendentes que o grupo já informou ter pago
+
+
+class RentListOut(BaseModel):
+    month: str  # AAAA-MM
+    total: Decimal
+    paid: Decimal
+    pending: Decimal
+    exempt: Decimal
+    items: list[RentChargeOut]
+    groups: list[RentGroupSummary]
+
+
+class GroupRentOut(BaseModel):
+    pending_amount: Decimal
+    pending_count: int
+    items: list[RentChargeOut]  # todas as pendentes e as últimas quitadas
+
+
+# ------------------------------------------------------------------ painel
+
+
+class CourtOccupancy(BaseModel):
+    court_id: int
+    name: str
+    open_hours: float
+    booked_hours: float
+    blocked_hours: float
+    occupancy_rate: float | None
+
+
+class AtRiskMatch(BaseModel):
+    match_id: int
+    match_name: str
+    group_id: int
+    group_name: str
+    court_name: str
+    starts_at: datetime
+    confirmed: int
+    slots: int
+
+
+class OverdueGroup(BaseModel):
+    group_id: int
+    group_name: str
+    pending_amount: Decimal
+    charges: int
+    oldest_match_at: datetime
+    reported: int
+
+
+class GroupActivity(BaseModel):
+    group_id: int
+    group_name: str
+    matches_held: int
+    matches_cancelled: int
+    fill_rate: float | None  # confirmados (ou presentes) / vagas nas peladas realizadas
+    rent_pending: Decimal
+
+
+class VenueDashboardOut(BaseModel):
+    since: date
+    until: date
+    open_hours: float
+    booked_hours: float
+    occupancy_rate: float | None
+    matches_held: int
+    matches_upcoming: int
+    matches_cancelled: int
+    cancelled_hours: float
+    rent_expected: Decimal  # aluguel das peladas realizadas no período
+    rent_received: Decimal
+    rent_pending: Decimal
+    rent_overdue_total: Decimal  # tudo que está pendente, de qualquer período
+    active_groups: int
+    pending_requests: int
+    courts: list[CourtOccupancy]
+    at_risk: list[AtRiskMatch]  # próximos 7 dias com menos da metade das vagas confirmadas
+    overdue_groups: list[OverdueGroup]
+    groups: list[GroupActivity]

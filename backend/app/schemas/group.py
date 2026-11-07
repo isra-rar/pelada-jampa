@@ -23,6 +23,9 @@ class GroupSettings(BaseModel):
     outlier_threshold: float | None = Field(default=None, gt=0, le=5)
     exclude_outliers: bool | None = None
     draw_weights: dict[str, float] | None = None
+    charge_no_shows: bool | None = None
+    charge_late_cancellations: bool | None = None
+    public_ranking_enabled: bool | None = None
 
     @field_validator("draw_weights")
     @classmethod
@@ -70,6 +73,12 @@ class GroupOut(ORMModel):
     outlier_threshold: float
     exclude_outliers: bool
     draw_weights: dict[str, float]
+    charge_no_shows: bool = False
+    charge_late_cancellations: bool = False
+    public_ranking_enabled: bool = False
+    public_token: str | None = None
+    suspended_at: datetime | None = None
+    suspension_reason: str | None = None
     created_at: datetime
     my_role: GroupRole | None = None
     my_member_id: int | None = None

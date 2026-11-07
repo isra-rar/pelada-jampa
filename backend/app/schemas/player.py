@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from app.domain.enums import Position, RatingKind
 from app.schemas.common import ORMModel
 from app.schemas.group import SkillOut
+from app.schemas.stats import PlayerGameStats
 
 
 class RatingOut(BaseModel):
@@ -67,6 +68,7 @@ class AttendanceStats(BaseModel):
     absent: int
     confirmations: int
     late_cancellations: int
+    no_shows: int = 0  # confirmou e faltou
 
 
 class FinanceSituation(BaseModel):
@@ -96,3 +98,5 @@ class PlayerProfile(BaseModel):
     attendance: AttendanceStats
     finance: FinanceSituation | None  # apenas para o próprio jogador e administradores
     rating_explanation: RatingExplanation
+    game_stats: PlayerGameStats | None = None
+    pending_skill: SkillOut | None = None

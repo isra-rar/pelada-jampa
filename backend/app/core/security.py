@@ -28,6 +28,12 @@ def create_access_token(user_id: int, expires_minutes: int | None = None) -> str
 
 
 def decode_access_token(token: str) -> int | None:
+    claims = decode_access_claims(token)
+    return claims[0] if claims else None
+
+
+def decode_access_claims(token: str) -> tuple[int, int] | None:
+    """Retorna (user_id, iat) de um token de acesso válido."""
     try:
         # expiração validada abaixo com o relógio único da aplicação
         payload = jwt.decode(
@@ -43,6 +49,6 @@ def decode_access_token(token: str) -> int | None:
     if int(payload["exp"]) <= int(utcnow().timestamp()):
         return None
     try:
-        return int(payload["sub"])
-    except (KeyError, ValueError):
+        return int(payload["sub"]), int(payload.get("iat", 0))
+    except (KeyError, ValueError, TypeError):
         return None

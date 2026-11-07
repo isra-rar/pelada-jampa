@@ -27,6 +27,7 @@ class Payment(Base):
     method: Mapped[str | None] = mapped_column(String(40), nullable=True)
     confirmed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    reported_paid_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)  # jogador informou
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 

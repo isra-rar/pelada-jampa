@@ -7,12 +7,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
-from app.core.errors import BusinessRuleError, Conflict, NotFound
-from app.domain.enums import PaymentStatus
-from app.models import FootballGroup, Match, Payment, User
+from app.core.errors import BusinessRuleError, Conflict, Forbidden, NotFound
+from app.domain.enums import NotificationType, PaymentStatus
+from app.models import FootballGroup, GroupMember, Match, Payment, User
 from app.schemas.finance import ChargeCreate, PaymentUpdate
-from app.services import audit
+from app.services import audit, notifications
 from app.services.access import get_member_in_group
+from app.services.groups import group_admin_user_ids
 
 ZERO = Decimal("0.00")
 _AUDIT_FIELDS = ["amount_due", "amount_paid", "status", "due_date", "paid_at", "method", "confirmed_by_id", "notes"]
@@ -42,6 +43,7 @@ def payment_out(p: Payment) -> dict:
         "method": p.method,
         "confirmed_by_id": p.confirmed_by_id,
         "notes": p.notes,
+        "reported_paid_at": p.reported_paid_at,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
     }
@@ -99,10 +101,13 @@ def list_payments(
     match_id: int | None = None,
     member_id: int | None = None,
     status: PaymentStatus | None = None,
+    reported: bool | None = None,
     page: int = 1,
     size: int = 50,
 ) -> tuple[list[Payment], int]:
     stmt = select(Payment).join(Match, Match.id == Payment.match_id).where(Payment.group_id == group_id)
+    if reported is not None:
+        stmt = stmt.where(Payment.reported_paid_at.is_not(None) if reported else Payment.reported_paid_at.is_(None))
     if match_id is not None:
         stmt = stmt.where(Payment.match_id == match_id)
     if member_id is not None:
@@ -303,3 +308,29 @@ def member_finance(db: Session, group_id: int, member_id: int) -> dict:
         "pending_amount": sum((outstanding(p) for p in pending), ZERO),
         "paid_amount": sum((Decimal(p.amount_paid) for p in rows if p.status == PaymentStatus.PAID), ZERO),
     }
+
+
+# ------------------------------------------------------------------ aviso de pagamento
+
+
+def report_paid(db: Session, group: FootballGroup, payment_id: int, member: GroupMember) -> Payment:
+    """O jogador avisa que pagou (o pagamento é feito por fora do app). Só o administrador confirma o
+    recebimento."""
+    p = get_payment(db, group.id, payment_id, lock=True)
+    if p.member_id != member.id:
+        raise Forbidden("Você só pode informar seus próprios pagamentos")
+    if p.status != PaymentStatus.PENDING:
+        raise BusinessRuleError("Este lançamento não está pendente", code="not_pending")
+    if p.reported_paid_at is None:
+        p.reported_paid_at = utcnow()
+        notifications.notify(
+            db, group_admin_user_ids(db, group.id), NotificationType.PAYMENT_REPORTED,
+            "Pagamento informado",
+            f"{member.display_name} informou o pagamento de R$ {outstanding(p):.2f} ({p.match.name}). "
+            "Confira e confirme o recebimento.",
+            group_id=group.id, match_id=p.match_id,
+        )
+        audit.record(db, action="payment.reported", entity_type="payment", entity_id=p.id,
+                     actor_user_id=member.user_id, group_id=group.id)
+    db.commit()
+    return p

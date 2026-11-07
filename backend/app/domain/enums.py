@@ -97,3 +97,36 @@ class NotificationType(StrEnum):
     TEAMS_PUBLISHED = "teams_published"
     MATCH_CANCELLED = "match_cancelled"
     MEMBERSHIP = "membership"
+    PAYMENT_REPORTED = "payment_reported"
+    RESULT_REGISTERED = "result_registered"
+    GROUP_STATUS = "group_status"  # suspensão/reativação pela administração da plataforma
+    VENUE = "venue"  # espaço (quadra): vínculo com o grupo e aluguel
+
+
+class VenueRole(StrEnum):
+    OWNER = "owner"  # dono: tudo, inclusive equipe
+    MANAGER = "manager"  # funcionário: agenda, grupos e aluguel
+
+
+class VenueLinkStatus(StrEnum):
+    PENDING = "pending"  # grupo pediu vínculo, aguardando o espaço
+    ACTIVE = "active"
+    REJECTED = "rejected"
+    ENDED = "ended"
+
+
+class VenueLinkOrigin(StrEnum):
+    VENUE = "venue"  # grupo criado pelo espaço: o espaço define o administrador
+    REQUEST = "request"  # grupo independente que pediu vínculo
+
+
+class RentStatus(StrEnum):
+    PENDING = "pending"
+    PAID = "paid"
+    EXEMPT = "exempt"
+    CANCELLED = "cancelled"  # pelada cancelada
+
+
+class GameStatus(StrEnum):
+    LIVE = "live"  # em andamento: cronômetro correndo e gols lançados um a um
+    FINISHED = "finished"

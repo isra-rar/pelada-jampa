@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Query, status
 from sqlalchemy import select
 
@@ -22,9 +24,10 @@ from app.schemas.group import (
     SkillOut,
     SkillUpdate,
 )
+from app.schemas.metrics import GroupMetricsOut
 from app.schemas.misc import AdminDashboard, AuditOut
 from app.schemas.player import PlayerProfile, PlayerSummary, ProvisionalRatingIn, RatingHistoryOut, RatingOut
-from app.services import attendance, audit, dashboard, groups, payments, ratings
+from app.services import attendance, audit, dashboard, groups, metrics, payments, ratings, stats
 from app.services.access import get_group, get_member_in_group, require_admin, require_member
 
 router = APIRouter(tags=["Grupos, jogadores e perfis"])
@@ -35,6 +38,7 @@ def group_out(group, member: GroupMember) -> dict:
     data["my_role"] = member.role
     data["my_member_id"] = member.id
     data["invite_token"] = group.invite_token if member.is_admin else None
+    data["public_token"] = group.public_token if (group.public_ranking_enabled or member.is_admin) else None
     return data
 
 
@@ -89,6 +93,13 @@ def rotate_invite(group_id: int, user: CurrentUser, db: DB):
     return {"invite_token": group.invite_token, "group_id": group.id}
 
 
+@router.post("/groups/{group_id}/public-ranking/rotate", response_model=GroupOut)
+def rotate_public_link(group_id: int, user: CurrentUser, db: DB):
+    """Gera um novo link público do ranking, invalidando o anterior."""
+    member = require_admin(db, group_id, user)
+    return group_out(groups.rotate_public_token(db, get_group(db, group_id), user), member)
+
+
 @router.post("/invites/{token}/join", response_model=JoinOut)
 def join(token: str, user: CurrentUser, db: DB):
     """Entrar em um grupo pelo link de convite."""
@@ -100,6 +111,18 @@ def join(token: str, user: CurrentUser, db: DB):
 def admin_dashboard(group_id: int, user: CurrentUser, db: DB):
     member = require_admin(db, group_id, user)
     return dashboard.admin_dashboard(db, get_group(db, group_id), member)
+
+
+@router.get("/groups/{group_id}/metrics", response_model=GroupMetricsOut)
+def group_metrics(
+    group_id: int, user: CurrentUser, db: DB,
+    since: date | None = Query(default=None, description="Data inicial (inclusiva, horário de Brasília); padrão: 90 dias"),
+    until: date | None = Query(default=None, description="Data final (inclusiva); padrão: hoje"),
+):
+    """Indicadores de sucesso do grupo (PRD §21): respostas, ocupação, desistências, avaliações,
+    pagamentos, equilíbrio dos sorteios e retenção de jogadores."""
+    require_admin(db, group_id, user)
+    return metrics.group_metrics(db, group_id, since, until)
 
 
 @router.get("/groups/{group_id}/audit", response_model=Page[AuditOut])
@@ -237,7 +260,9 @@ def _profile(db, group, member: GroupMember, viewer: GroupMember) -> dict:
         "ratings": [ratings.to_out(r) for r in rows],
         "attendance": attendance.attendance_stats(db, member.id),
         "finance": payments.member_finance(db, group.id, member.id) if can_see_finance else None,
-        "rating_explanation": ratings.explanation(group),
+        "rating_explanation": ratings.explanation(db, group),
+        "game_stats": stats.member_stats(db, group.id, member.id),
+        "pending_skill": member.pending_skill if can_see_finance else None,
     }
 
 

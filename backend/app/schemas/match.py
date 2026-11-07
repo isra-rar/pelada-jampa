@@ -14,14 +14,22 @@ class _MatchBase(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
     modality: Modality = Modality.SOCIETY
-    location: str = Field(min_length=2, max_length=160)
+    # com `court_id` o local e o endereço vêm do espaço vinculado ao grupo
+    location: str | None = Field(default=None, min_length=2, max_length=160)
     address: str | None = Field(default=None, max_length=300)
+    court_id: int | None = None
     price: Decimal = Field(default=Decimal("0"), ge=0, max_digits=10, decimal_places=2)
     slots: int = Field(ge=2, le=200)
     field_players_per_team: int = Field(ge=1, le=20)
     goalkeepers_per_team: int = Field(default=1, ge=0, le=2)
     evaluation_window_hours: EvaluationWindow = 24
     responsible_admin_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _place(self):
+        if not self.location and self.court_id is None:
+            raise ValueError("Informe o local ou a quadra")
+        return self
 
 
 class MatchCreate(_MatchBase):
@@ -46,6 +54,7 @@ class MatchUpdate(BaseModel):
     modality: Modality | None = None
     location: str | None = Field(default=None, min_length=2, max_length=160)
     address: str | None = Field(default=None, max_length=300)
+    court_id: int | None = Field(default=None, description="null remove a reserva da quadra")
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
@@ -83,6 +92,7 @@ class MatchOut(ORMModel):
     modality: Modality
     location: str
     address: str | None
+    court_id: int | None = None
     starts_at: datetime
     ends_at: datetime
     duration_minutes: int
@@ -114,6 +124,8 @@ class SeriesCreate(_MatchBase):
     confirmation_deadline_hours: int = Field(default=2, ge=0, le=24 * 7)
     cancellation_deadline_hours: int | None = Field(default=None, ge=0, le=24 * 7)
     generate_count: int = Field(default=4, ge=0, le=26)
+    auto_generate_ahead: int = Field(default=1, ge=0, le=8,
+                                     description="Ocorrências futuras mantidas pelo agendador (0 = só manual)")
 
 
 class SeriesUpdate(BaseModel):
@@ -121,6 +133,7 @@ class SeriesUpdate(BaseModel):
     description: str | None = None
     location: str | None = None
     address: str | None = None
+    court_id: int | None = Field(default=None, description="null remove a quadra das próximas ocorrências")
     duration_minutes: int | None = Field(default=None, ge=15, le=600)
     price: Decimal | None = Field(default=None, ge=0)
     slots: int | None = Field(default=None, ge=2, le=200)
@@ -131,6 +144,7 @@ class SeriesUpdate(BaseModel):
     evaluation_window_hours: EvaluationWindow | None = None
     responsible_admin_ids: list[int] | None = None
     is_active: bool | None = None
+    auto_generate_ahead: int | None = Field(default=None, ge=0, le=8)
 
 
 class SeriesOut(ORMModel):
@@ -142,6 +156,7 @@ class SeriesOut(ORMModel):
     modality: Modality
     location: str
     address: str | None
+    court_id: int | None = None
     first_starts_at: datetime
     duration_minutes: int
     price: Decimal
@@ -153,6 +168,7 @@ class SeriesOut(ORMModel):
     evaluation_window_hours: int
     responsible_admin_ids: list[int]
     is_active: bool
+    auto_generate_ahead: int = 1
     last_generated_starts_at: datetime | None
 
 

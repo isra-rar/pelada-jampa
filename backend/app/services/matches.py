@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
-from app.core.errors import BusinessRuleError
+from app.core.errors import BusinessRuleError, Conflict
 from app.domain.enums import (
     AttendanceStatus,
     GroupRole,
@@ -18,12 +18,13 @@ from app.domain.enums import (
 )
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, MatchSeries, User
 from app.schemas.match import MatchCreate, MatchUpdate, SeriesCreate, SeriesUpdate
-from app.services import audit, notifications
+from app.services import audit, notifications, venues
+from app.services.groups import group_admin_user_ids
 
 DEFAULT_CONFIRMATION_HOURS = 2
 
 _MATCH_AUDIT_FIELDS = [
-    "name", "description", "modality", "location", "address", "starts_at", "ends_at", "price", "slots",
+    "name", "description", "modality", "location", "address", "court_id", "starts_at", "ends_at", "price", "slots",
     "field_players_per_team", "goalkeepers_per_team", "confirmation_deadline", "cancellation_deadline",
     "evaluation_window_hours", "waitlist_auto_promote", "responsible_admin_ids", "status",
 ]
@@ -87,14 +88,22 @@ def create_match(
     confirmation = _aware(data.confirmation_deadline) or starts_at - timedelta(hours=DEFAULT_CONFIRMATION_HOURS)
     cancellation = _aware(data.cancellation_deadline)
     _validate_schedule(starts_at, ends_at, confirmation, cancellation)
+    location, address = data.location, data.address
+    if data.court_id is not None:
+        # quadra de espaço vinculado: reserva o horário (falha se ocupado, bloqueado ou fora do funcionamento)
+        court = venues.court_for_group(db, group, data.court_id)
+        venues.check_slot(db, court, starts_at, ends_at)
+        label, venue_address = venues.court_label(db, court)
+        location, address = location or label, address or venue_address
     match = Match(
         group_id=group.id,
         series_id=series.id if series else None,
         name=data.name,
         description=data.description,
         modality=data.modality,
-        location=data.location,
-        address=data.address,
+        location=location,
+        address=address,
+        court_id=data.court_id,
         starts_at=starts_at,
         ends_at=ends_at,
         price=data.price,
@@ -132,11 +141,11 @@ def publish_match(db: Session, group: FootballGroup, match: Match, actor: User, 
     for m in members:
         if m.id not in existing:
             db.add(MatchPlayer(match_id=match.id, member_id=m.id, status=AttendanceStatus.PENDING))
-    when = match.starts_at.strftime("%d/%m %H:%M UTC")
+    when = notifications.when(match.starts_at)
     notifications.notify(
         db, [m.user_id for m in members], NotificationType.MATCH_CREATED, f"Nova pelada: {match.name}",
         f"{when} em {match.location}. Confirme sua presença até "
-        f"{match.confirmation_deadline.strftime('%d/%m %H:%M UTC')}.",
+        f"{notifications.when(match.confirmation_deadline)}.",
         group_id=group.id, match_id=match.id,
     )
     audit.record(db, action="match.published", entity_type="match", entity_id=match.id, actor_user_id=actor.id,
@@ -158,11 +167,19 @@ def update_match(db: Session, group: FootballGroup, match: Match, data: MatchUpd
             _aware(changes[key])
     if "responsible_admin_ids" in changes and changes["responsible_admin_ids"] is not None:
         changes["responsible_admin_ids"] = _validate_admins(db, group.id, changes["responsible_admin_ids"])
+    court_changed = "court_id" in changes and changes["court_id"] != match.court_id
+    old_times = (match.starts_at, match.ends_at)
     for key, value in changes.items():
-        if value is None and key not in ("description", "address", "cancellation_deadline"):
+        if value is None and key not in ("description", "address", "cancellation_deadline", "court_id"):
             continue
         setattr(match, key, value)
     _validate_schedule(match.starts_at, match.ends_at, match.confirmation_deadline, match.cancellation_deadline)
+    if match.court_id is not None and (court_changed or (match.starts_at, match.ends_at) != old_times):
+        court = venues.court_for_group(db, group, match.court_id)
+        venues.check_slot(db, court, match.starts_at, match.ends_at, exclude_match_id=match.id)
+        if court_changed and "location" not in changes:
+            match.location, venue_address = venues.court_label(db, court)
+            match.address = changes.get("address") or venue_address
     db.flush()
     after = audit.snapshot(match, _MATCH_AUDIT_FIELDS)
     if before != after:
@@ -198,7 +215,7 @@ def list_matches(
     db: Session,
     group_id: int,
     *,
-    status: MatchStatus | None,
+    status: MatchStatus | list[MatchStatus] | None,
     upcoming: bool | None,
     include_drafts: bool,
     page: int,
@@ -206,7 +223,7 @@ def list_matches(
 ) -> tuple[list[Match], int]:
     stmt = select(Match).where(Match.group_id == group_id)
     if status:
-        stmt = stmt.where(Match.status == status)
+        stmt = stmt.where(Match.status.in_(status if isinstance(status, list) else [status]))
     if not include_drafts:
         stmt = stmt.where(Match.status != MatchStatus.DRAFT)
     order = Match.starts_at.desc()
@@ -284,6 +301,10 @@ def create_series(db: Session, group: FootballGroup, data: SeriesCreate, actor: 
     _aware(data.first_starts_at)
     values = data.model_dump(exclude={"generate_count"})
     values["responsible_admin_ids"] = _validate_admins(db, group.id, data.responsible_admin_ids) or [actor.id]
+    if data.court_id is not None:
+        label, venue_address = venues.court_label(db, venues.court_for_group(db, group, data.court_id))
+        values["location"] = data.location or label
+        values["address"] = data.address or venue_address
     series = MatchSeries(group_id=group.id, created_by_id=actor.id, **values)
     db.add(series)
     db.flush()
@@ -301,8 +322,12 @@ def update_series(db: Session, group: FootballGroup, series: MatchSeries, data: 
     changes = data.model_dump(exclude_unset=True)
     if changes.get("responsible_admin_ids") is not None:
         changes["responsible_admin_ids"] = _validate_admins(db, group.id, changes["responsible_admin_ids"])
+    if changes.get("court_id") is not None and changes["court_id"] != series.court_id:
+        label, venue_address = venues.court_label(db, venues.court_for_group(db, group, changes["court_id"]))
+        changes.setdefault("location", label)
+        changes["address"] = changes.get("address") or venue_address
     for key, value in changes.items():
-        if value is None and key not in ("description", "address", "cancellation_deadline_hours"):
+        if value is None and key not in ("description", "address", "cancellation_deadline_hours", "court_id"):
             continue
         setattr(series, key, value)
     audit.record(db, action="series.updated", entity_type="match_series", entity_id=series.id,
@@ -312,14 +337,19 @@ def update_series(db: Session, group: FootballGroup, series: MatchSeries, data: 
 
 
 def generate_occurrences(
-    db: Session, group: FootballGroup, series: MatchSeries, count: int, actor: User, *, commit: bool = True
+    db: Session, group: FootballGroup, series: MatchSeries, count: int, actor: User, *, commit: bool = True,
+    skip_conflicts: bool = False,
 ) -> list[Match]:
+    """Gera as próximas ocorrências. Com quadra, cada data reserva o horário; `skip_conflicts` (agendador) pula
+    datas indisponíveis em vez de falhar."""
     if not series.is_active:
         raise BusinessRuleError("Recorrência inativa", code="series_inactive")
     created: list[Match] = []
     previous = series.last_generated_starts_at
     now = utcnow()
-    while len(created) < count:
+    attempts = 0
+    while len(created) < count and attempts < count * 4 + 8:
+        attempts += 1
         starts_at = next_occurrence(series, previous)
         previous = starts_at
         if starts_at <= now:
@@ -330,6 +360,7 @@ def generate_occurrences(
             modality=series.modality,
             location=series.location,
             address=series.address,
+            court_id=series.court_id,
             price=series.price,
             slots=series.slots,
             field_players_per_team=series.field_players_per_team,
@@ -346,11 +377,62 @@ def generate_occurrences(
             ),
             publish=True,
         )
-        created.append(create_match(db, group, data, actor, series=series, commit=False))
+        try:
+            created.append(create_match(db, group, data, actor, series=series, commit=False))
+        except Conflict as exc:
+            if not skip_conflicts:
+                raise
+            # horário indisponível na quadra: registra e segue para a próxima data
+            audit.record(db, action="series.slot_skipped", entity_type="match_series", entity_id=series.id,
+                         actor_user_id=None, group_id=group.id,
+                         after={"starts_at": starts_at, "reason": exc.details.get("reason")})
         series.last_generated_starts_at = starts_at
     if commit:
         db.commit()
     return created
+
+
+def auto_generate_due(db: Session) -> int:
+    """Tarefa do agendador: mantém `auto_generate_ahead` ocorrências futuras em cada recorrência ativa.
+
+    Ocorrências canceladas não contam (o próximo horário é gerado no lugar). Idempotente: a contagem é
+    refeita a cada execução e `last_generated_starts_at` impede datas repetidas.
+    """
+    now = utcnow()
+    rows = db.execute(
+        select(MatchSeries, FootballGroup)
+        .join(FootballGroup, FootballGroup.id == MatchSeries.group_id)
+        .where(MatchSeries.is_active.is_(True), MatchSeries.auto_generate_ahead > 0,
+               FootballGroup.is_active.is_(True))
+        .with_for_update(of=MatchSeries)
+    ).all()
+    total = 0
+    for series, group in rows:
+        upcoming = db.scalar(
+            select(func.count()).select_from(Match).where(
+                Match.series_id == series.id, Match.starts_at > now, Match.status != MatchStatus.CANCELLED,
+            )
+        ) or 0
+        missing = series.auto_generate_ahead - upcoming
+        if missing <= 0:
+            continue
+        # quem criou a recorrência pode ter deixado de ser administrador: usa só administradores atuais
+        admins = set(group_admin_user_ids(db, group.id))
+        if not admins:
+            continue
+        responsible = [u for u in (series.responsible_admin_ids or []) if u in admins]
+        if responsible != list(series.responsible_admin_ids or []):
+            series.responsible_admin_ids = responsible
+        actor_id = series.created_by_id if series.created_by_id in admins else (responsible or sorted(admins))[0]
+        created = generate_occurrences(db, group, series, missing, db.get(User, actor_id), commit=False,
+                                       skip_conflicts=True)
+        for match in created:
+            audit.record(db, action="series.auto_generated", entity_type="match", entity_id=match.id,
+                         actor_user_id=None, group_id=group.id, after={"series_id": series.id,
+                                                                      "starts_at": match.starts_at})
+        total += len(created)
+    db.commit()
+    return total
 
 
 def list_series(db: Session, group_id: int) -> list[MatchSeries]:

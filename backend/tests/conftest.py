@@ -1,4 +1,5 @@
 import os
+import tempfile
 import warnings
 
 os.environ["PELADA_DATABASE_URL"] = os.environ.get("PELADA_TEST_DATABASE_URL", "sqlite://")
@@ -6,6 +7,9 @@ os.environ["PELADA_SCHEDULER_ENABLED"] = "false"
 os.environ["PELADA_ENVIRONMENT"] = "test"
 os.environ["PELADA_DRAW_TIME_LIMIT_SECONDS"] = "0.5"
 os.environ["PELADA_ACCESS_TOKEN_EXPIRE_MINUTES"] = str(60 * 24 * 30)
+os.environ["PELADA_MEDIA_DIR"] = tempfile.mkdtemp(prefix="pelada-media-")
+os.environ.pop("PELADA_VAPID_PUBLIC_KEY", None)
+os.environ.pop("PELADA_VAPID_PRIVATE_KEY", None)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from datetime import datetime, timedelta, timezone  # noqa: E402

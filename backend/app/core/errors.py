@@ -6,12 +6,20 @@ class AppError(Exception):
     status_code = 400
     code = "bad_request"
 
-    def __init__(self, message: str, *, code: str | None = None, details: dict | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ):
         super().__init__(message)
         self.message = message
         if code:
             self.code = code
         self.details = details or {}
+        self.headers = headers
 
 
 class NotFound(AppError):
@@ -39,12 +47,19 @@ class BusinessRuleError(AppError):
     code = "business_rule"
 
 
+class TooManyRequests(AppError):
+    status_code = 429
+    code = "too_many_attempts"
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _handle(_: Request, exc: AppError):
-        headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, Unauthorized) else None
+        headers = dict(exc.headers or {})
+        if isinstance(exc, Unauthorized):
+            headers["WWW-Authenticate"] = "Bearer"
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
-            headers=headers,
+            headers=headers or None,
         )

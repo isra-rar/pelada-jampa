@@ -3,14 +3,29 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import admin, auth, draws, evaluations, finance, groups, matches, notifications
+from app.api.deps import block_writes_in_suspended_group
+from app.api.routes import (
+    admin,
+    auth,
+    draws,
+    evaluations,
+    finance,
+    groups,
+    matches,
+    notifications,
+    push,
+    stats,
+    venues,
+)
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.errors import register_error_handlers
 from app.services.groups import seed_default_skills
+from app.services.media import media_root
 from app.services.scheduler import scheduler_loop
 
 logging.basicConfig(level=logging.INFO)
@@ -53,8 +68,13 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     register_error_handlers(app)
-    for module in (auth, groups, matches, evaluations, finance, draws, notifications, admin):
-        app.include_router(module.router, prefix=API_PREFIX)
+    group_scoped = {groups, matches, evaluations, finance, draws, stats, venues}  # grupo suspenso: só leitura
+    for module in (auth, groups, matches, evaluations, finance, draws, stats, venues, notifications, push, admin):
+        guard = [Depends(block_writes_in_suspended_group)] if module in group_scoped else []
+        app.include_router(module.router, prefix=API_PREFIX, dependencies=guard)
+    app.include_router(stats.public_router, prefix=API_PREFIX)
+    # fotos enviadas pelos usuários (o tipo é validado pelo conteúdo no upload)
+    app.mount("/media", StaticFiles(directory=media_root()), name="media")
 
     @app.get("/health", tags=["Infra"])
     def health():

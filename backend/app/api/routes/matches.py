@@ -39,7 +39,7 @@ def create_match(group_id: int, data: MatchCreate, user: CurrentUser, db: DB):
 @router.get("/groups/{group_id}/matches", response_model=Page[MatchOut])
 def list_matches(
     group_id: int, user: CurrentUser, db: DB, paging: Paging,
-    status_: MatchStatus | None = Query(default=None, alias="status"),
+    status_: list[MatchStatus] | None = Query(default=None, alias="status", description="Repita para vários"),
     upcoming: bool | None = Query(default=None, description="true: futuras; false: passadas"),
 ):
     member = require_member(db, group_id, user)

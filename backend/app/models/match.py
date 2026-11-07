@@ -23,6 +23,10 @@ class MatchSeries(Base):
     modality: Mapped[Modality] = mapped_column(str_enum(Modality))
     location: Mapped[str] = mapped_column(String(160))
     address: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # quadra de um espaço vinculado ao grupo (opcional): reserva o horário na agenda do espaço
+    court_id: Mapped[int | None] = mapped_column(
+        ForeignKey("courts.id", name="fk_match_series_court_id"), nullable=True
+    )
     first_starts_at: Mapped[datetime] = mapped_column(UTCDateTime)
     duration_minutes: Mapped[int] = mapped_column(Integer)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0"))
@@ -34,6 +38,8 @@ class MatchSeries(Base):
     evaluation_window_hours: Mapped[int] = mapped_column(Integer, default=24)
     responsible_admin_ids: Mapped[list] = mapped_column(JSON, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # quantas ocorrências futuras o agendador mantém criadas (0 = só geração manual)
+    auto_generate_ahead: Mapped[int] = mapped_column(Integer, default=1)
     last_generated_starts_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
@@ -54,6 +60,9 @@ class Match(Base):
     modality: Mapped[Modality] = mapped_column(str_enum(Modality))
     location: Mapped[str] = mapped_column(String(160))
     address: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    court_id: Mapped[int | None] = mapped_column(
+        ForeignKey("courts.id", name="fk_matches_court_id"), nullable=True, index=True
+    )
     starts_at: Mapped[datetime] = mapped_column(UTCDateTime)
     ends_at: Mapped[datetime] = mapped_column(UTCDateTime)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0"))

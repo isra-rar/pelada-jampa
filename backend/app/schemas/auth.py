@@ -31,6 +31,9 @@ class UserOut(ORMModel):
     photo_url: str | None
     is_platform_admin: bool
     is_active: bool
+    has_password: bool = True
+    google_linked: bool = False
+    deleted_at: datetime | None = None
     created_at: datetime
 
 
@@ -42,6 +45,28 @@ class UserUpdate(BaseModel):
     current_password: str | None = None
 
 
+class AccountDeleteIn(BaseModel):
+    confirm: str = Field(max_length=20, description="Digite EXCLUIR")
+    password: str | None = Field(default=None, max_length=128, description="Obrigatória para contas com senha")
+
+
 class PlatformUserUpdate(BaseModel):
     is_active: bool | None = None
     is_platform_admin: bool | None = None
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class GoogleCredentialIn(BaseModel):
+    credential: str = Field(min_length=20, max_length=4096, description="ID token devolvido pelo Google")
+
+
+class AuthConfigOut(BaseModel):
+    google_client_id: str | None

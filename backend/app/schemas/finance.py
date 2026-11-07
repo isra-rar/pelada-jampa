@@ -23,6 +23,7 @@ class PaymentOut(BaseModel):
     method: str | None
     confirmed_by_id: int | None
     notes: str | None
+    reported_paid_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

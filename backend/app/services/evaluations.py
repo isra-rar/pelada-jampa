@@ -42,11 +42,17 @@ def refresh_window(db: Session, group: FootballGroup, match: Match) -> None:
         db.refresh(match)
 
 
-def _require_evaluator(present: dict[int, MatchPlayer], member: GroupMember) -> MatchPlayer:
-    mp = present.get(member.id)
-    if mp is None:
-        raise Forbidden("Apenas jogadores com presença registrada podem avaliar", code="not_present")
-    return mp
+def _require_evaluator(present: dict[int, MatchPlayer], member: GroupMember) -> None:
+    """Avalia quem esteve presente; administradores do grupo também, mesmo sem jogar (configurável)."""
+    if member.id in present:
+        return
+    if settings.admins_can_evaluate and member.is_admin:
+        return
+    raise Forbidden("Apenas jogadores com presença registrada podem avaliar", code="not_present")
+
+
+def _targets_total(present: dict[int, MatchPlayer], member: GroupMember) -> int:
+    return len(present) - (1 if member.id in present else 0)
 
 
 def _evaluated_by(db: Session, match_id: int, evaluator_id: int) -> set[int]:
@@ -157,7 +163,7 @@ def submit(db: Session, group: FootballGroup, match: Match, member: GroupMember,
         _refresh_flags(db, group, match.id, tid)
     db.commit()
     done = len(already) + len(to_create)
-    return {"created": len(to_create), "done": done, "total": len(present) - 1}
+    return {"created": len(to_create), "done": done, "total": _targets_total(present, member)}
 
 
 def progress(db: Session, group: FootballGroup, match: Match) -> dict:
@@ -175,7 +181,8 @@ def progress(db: Session, group: FootballGroup, match: Match) -> dict:
         select(func.count()).where(Evaluation.match_id == match.id, Evaluation.is_flagged.is_(True))
     ) or 0
     expected = n * (n - 1)
-    submitted = sum(per_evaluator.values())
+    # progresso dos jogadores; avaliações de administradores que não jogaram não entram na conta
+    submitted = sum(per_evaluator.get(mid, 0) for mid in present)
     evaluators = [
         {
             "member_id": mid,
@@ -333,7 +340,8 @@ def close_due_windows(db: Session) -> int:
 def send_closing_reminders(db: Session) -> int:
     limit = utcnow() + timedelta(minutes=settings.evaluation_reminder_minutes_before)
     matches = db.scalars(
-        select(Match).where(
+        select(Match).join(FootballGroup, FootballGroup.id == Match.group_id).where(
+            FootballGroup.suspended_at.is_(None),  # grupo suspenso não aceita avaliações: não lembra
             Match.evaluation_status == EvaluationStatus.OPEN,
             Match.evaluation_reminder_sent_at.is_(None),
             Match.evaluation_closes_at <= limit,
@@ -352,7 +360,7 @@ def send_closing_reminders(db: Session) -> int:
         pending_users = [mp.member.user_id for mid, mp in present.items() if done.get(mid, 0) < len(present) - 1]
         sent += notifications.notify(
             db, pending_users, NotificationType.EVALUATION_CLOSING, f"Avaliações de {match.name} encerrando",
-            f"Faltam poucos minutos. Prazo: {match.evaluation_closes_at.strftime('%d/%m %H:%M UTC')}.",
+            f"Faltam poucos minutos. Prazo: {notifications.when(match.evaluation_closes_at)}.",
             group_id=match.group_id, match_id=match.id,
         )
         match.evaluation_reminder_sent_at = utcnow()

@@ -10,7 +10,7 @@ from app.core.errors import BusinessRuleError, Conflict, NotFound
 from app.domain.enums import AttendanceStatus, GroupRole, MatchStatus, MemberStatus, NotificationType, Position
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, SpecialSkill, User
 from app.schemas.group import GroupCreate, GroupUpdate, MemberAdd, MemberAdminUpdate, MyMemberUpdate
-from app.services import audit, notifications, ratings, users
+from app.services import audit, notifications, platform, ratings, users
 
 DEFAULT_SKILLS = [
     ("muralha", "Muralha", "Sou muito bom na defesa"),
@@ -32,8 +32,9 @@ _GROUP_AUDIT_FIELDS = [
     "waitlist_offer_expiry_minutes", "skill_change_requires_approval", "allow_manual_team_adjust",
     "goalkeeper_rating_mode", "initial_rating", "min_evaluations_to_consolidate", "rating_match_weight",
     "provisional_match_weight", "min_evaluators_full_weight", "outlier_threshold", "exclude_outliers",
-    "draw_weights",
+    "draw_weights", "charge_no_shows", "charge_late_cancellations", "public_ranking_enabled",
 ]
+_NULLABLE_SETTINGS = {"description"}
 
 
 def seed_default_skills(db: Session) -> None:
@@ -51,18 +52,30 @@ def _new_token() -> str:
 # ------------------------------------------------------------------ grupos
 
 
-def create_group(db: Session, user: User, data: GroupCreate) -> tuple[FootballGroup, GroupMember]:
+def create_group(
+    db: Session, user: User, data: GroupCreate, *, actor: User | None = None, commit: bool = True
+) -> tuple[FootballGroup, GroupMember]:
+    """Cria o grupo com `user` como administrador. `actor` é quem cria, quando não é o próprio administrador
+    (ex.: o espaço que cria a pelada e define quem a administra)."""
+    actor = actor or user
+    # regras de nota e sorteio partem dos padrões da plataforma; o que vier no pedido prevalece
+    defaults = platform.group_defaults(db)
     values = data.model_dump(exclude_none=True)
-    group = FootballGroup(**values, invite_token=_new_token(), created_by_id=user.id)
+    if "draw_weights" in values:
+        values["draw_weights"] = {**defaults["draw_weights"], **values["draw_weights"]}
+    group = FootballGroup(**{**defaults, **values}, invite_token=_new_token(), created_by_id=actor.id)
+    if group.public_ranking_enabled:
+        group.public_token = _new_token()
     db.add(group)
     db.flush()
     member = GroupMember(group_id=group.id, user_id=user.id, role=GroupRole.ADMIN, status=MemberStatus.ACTIVE)
     db.add(member)
     db.flush()
     ratings.ensure_member_ratings(db, group, member)
-    audit.record(db, action="group.created", entity_type="group", entity_id=group.id, actor_user_id=user.id,
+    audit.record(db, action="group.created", entity_type="group", entity_id=group.id, actor_user_id=actor.id,
                  group_id=group.id, after=audit.snapshot(group, _GROUP_AUDIT_FIELDS))
-    db.commit()
+    if commit:
+        db.commit()
     return group, member
 
 
@@ -79,11 +92,13 @@ def list_user_groups(db: Session, user: User) -> list[tuple[FootballGroup, Group
 def update_group(db: Session, group: FootballGroup, data: GroupUpdate, actor: User) -> FootballGroup:
     before = audit.snapshot(group, _GROUP_AUDIT_FIELDS)
     for key, value in data.model_dump(exclude_unset=True).items():
-        if value is None and key not in ("description",):
+        if value is None and key not in _NULLABLE_SETTINGS:
             continue
         if key == "draw_weights":
             value = {**group.draw_weights, **value}
         setattr(group, key, value)
+    if group.public_ranking_enabled and not group.public_token:
+        group.public_token = _new_token()
     after = audit.snapshot(group, _GROUP_AUDIT_FIELDS)
     if before != after:
         audit.record(db, action="group.updated", entity_type="group", entity_id=group.id, actor_user_id=actor.id,
@@ -95,6 +110,14 @@ def update_group(db: Session, group: FootballGroup, data: GroupUpdate, actor: Us
 def rotate_invite(db: Session, group: FootballGroup, actor: User) -> FootballGroup:
     group.invite_token = _new_token()
     audit.record(db, action="group.invite_rotated", entity_type="group", entity_id=group.id,
+                 actor_user_id=actor.id, group_id=group.id)
+    db.commit()
+    return group
+
+
+def rotate_public_token(db: Session, group: FootballGroup, actor: User) -> FootballGroup:
+    group.public_token = _new_token()
+    audit.record(db, action="group.public_link_rotated", entity_type="group", entity_id=group.id,
                  actor_user_id=actor.id, group_id=group.id)
     db.commit()
     return group

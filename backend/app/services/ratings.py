@@ -8,7 +8,7 @@ from app.core.errors import BusinessRuleError
 from app.domain import rating as R
 from app.domain.enums import Position, RatingKind
 from app.models import FootballGroup, GroupMember, PlayerRating, PlayerRatingHistory
-from app.services import audit
+from app.services import audit, platform
 
 
 def keys_for(group: FootballGroup, kind: RatingKind) -> tuple[str, ...]:
@@ -61,7 +61,7 @@ def ensure_rating(db: Session, group: FootballGroup, member: GroupMember, kind: 
             kind=kind,
             attributes=attrs,
             average=avg,
-            tier=R.compute_tier(avg),
+            tier=R.compute_tier(avg, platform.tier_thresholds(db)),
             is_provisional=True,
             updated_at=utcnow(),
         )
@@ -73,7 +73,7 @@ def ensure_rating(db: Session, group: FootballGroup, member: GroupMember, kind: 
         before, avg_before, tier_before = dict(rating.attributes), rating.average, rating.tier
         rating.attributes = R.initial_attributes(keys, rating.average)
         rating.average = R.compute_average(rating.attributes, keys)
-        rating.tier = R.compute_tier(rating.average)
+        rating.tier = R.compute_tier(rating.average, platform.tier_thresholds(db))
         rating.updated_at = utcnow()
         _history(db, rating, reason="mode_change", before=before, avg_before=avg_before, tier_before=tier_before)
     return rating
@@ -126,7 +126,7 @@ def set_provisional(
     before, avg_before, tier_before = dict(rating.attributes), rating.average, rating.tier
     rating.attributes = clean
     rating.average = R.compute_average(clean, keys)
-    rating.tier = R.compute_tier(rating.average)
+    rating.tier = R.compute_tier(rating.average, platform.tier_thresholds(db))
     rating.updated_at = utcnow()
     _history(db, rating, reason="admin_provisional", before=before, avg_before=avg_before, tier_before=tier_before,
              actor_user_id=actor_user_id)
@@ -165,7 +165,7 @@ def apply_match_result(
     before, avg_before, tier_before = dict(rating.attributes), rating.average, rating.tier
     rating.attributes = new_attrs
     rating.average = R.compute_average(new_attrs, keys)
-    rating.tier = R.compute_tier(rating.average)
+    rating.tier = R.compute_tier(rating.average, platform.tier_thresholds(db))
     rating.valid_evaluations_count += n
     rating.matches_evaluated_count += 1
     if rating.valid_evaluations_count >= group.min_evaluations_to_consolidate:
@@ -189,7 +189,7 @@ def history(db: Session, member_id: int, kind: RatingKind | None, page: int, siz
     return list(items), total
 
 
-def explanation(group: FootballGroup) -> dict:
+def explanation(db: Session, group: FootballGroup) -> dict:
     return {
         "formula": (
             "nota_nova = nota_anterior × (1 − peso) + nota_da_partida × peso; "
@@ -199,5 +199,5 @@ def explanation(group: FootballGroup) -> dict:
         "provisional_match_weight": group.provisional_match_weight,
         "min_evaluators_full_weight": group.min_evaluators_full_weight,
         "min_evaluations_to_consolidate": group.min_evaluations_to_consolidate,
-        "tiers": {t: f"{R.TIER_LABELS[t]} (média ≥ {m:.2f})" for t, m in R.TIER_THRESHOLDS},
+        "tiers": {t: f"{R.TIER_LABELS[t]} (média ≥ {m:.2f})" for t, m in platform.tier_thresholds(db)},
     }

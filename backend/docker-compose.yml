@@ -25,6 +25,9 @@ services:
       PELADA_JWT_SECRET: ${PELADA_JWT_SECRET:-troque-este-segredo}
     ports:
       - "8000:8000"
+    volumes:
+      - media:/app/media  # fotos de perfil; sobrevivem a novos deploys
 
 volumes:
   pgdata:
+  media:

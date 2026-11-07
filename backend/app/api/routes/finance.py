@@ -16,15 +16,17 @@ def list_payments(
     group_id: int, user: CurrentUser, db: DB, paging: Paging,
     match_id: int | None = None, member_id: int | None = None,
     status_: PaymentStatus | None = Query(default=None, alias="status"),
+    reported: bool | None = Query(default=None, description="true: jogador informou que pagou"),
 ):
-    """Administradores veem tudo; jogadores veem apenas os próprios lançamentos."""
+    """Administradores veem tudo; jogadores veem apenas os próprios lançamentos. Ordem: pelada mais recente
+    primeiro."""
     me = require_member(db, group_id, user)
     if not me.is_admin:
         if member_id is not None and member_id != me.id:
             raise Forbidden("Você só pode consultar seus próprios pagamentos")
         member_id = me.id
     items, total = payments.list_payments(db, group_id, match_id=match_id, member_id=member_id, status=status_,
-                                          page=paging.page, size=paging.size)
+                                          reported=reported, page=paging.page, size=paging.size)
     return page_of([payments.payment_out(p) for p in items], total, paging)
 
 
@@ -68,3 +70,10 @@ def member_debts(group_id: int, member_id: int, user: CurrentUser, db: DB):
     if not (me.is_admin or me.id == member.id):
         raise Forbidden("Você só pode consultar suas próprias pendências")
     return [payments.debt_out(p) for p in payments.pending_debts(db, group_id, member.id)]
+
+
+@router.post("/groups/{group_id}/payments/{payment_id}/report", response_model=PaymentOut)
+def report_payment(group_id: int, payment_id: int, user: CurrentUser, db: DB):
+    """Jogador informa que já pagou (por fora do app); os administradores são avisados para confirmar."""
+    me = require_member(db, group_id, user)
+    return payments.payment_out(payments.report_paid(db, get_group(db, group_id), payment_id, me))

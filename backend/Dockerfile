@@ -14,4 +14,6 @@ RUN useradd --create-home appuser \
 USER appuser
 
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers"]
+# PORT vem da hospedagem (Railway); 1 worker de propósito: agendador e limite de tentativas vivem no processo.
+# Atrás de proxy, defina FORWARDED_ALLOW_IPS (lido pelo uvicorn) para valerem o IP real e o https.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --workers 1"]

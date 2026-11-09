@@ -4,8 +4,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 
 from app.api.deps import block_writes_in_suspended_group
 from app.api.routes import (
@@ -60,6 +62,10 @@ def create_app() -> FastAPI:
             "Tier, avaliações pós-jogo, controle financeiro e sorteio inteligente de times."
         ),
         lifespan=lifespan,
+        # em produção a documentação interativa fica fechada (o front não usa o openapi.json)
+        docs_url=None if settings.is_production else "/docs",
+        redoc_url=None if settings.is_production else "/redoc",
+        openapi_url=None if settings.is_production else "/openapi.json",
     )
     app.add_middleware(
         CORSMiddleware,
@@ -86,7 +92,14 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["Infra"])
     def health():
-        return {"status": "ok"}
+        """Checagem da hospedagem: responde 503 se o banco não estiver acessível."""
+        try:
+            with SessionLocal() as db:
+                db.execute(text("SELECT 1"))
+        except Exception:
+            logging.getLogger(__name__).exception("health: banco indisponível")
+            return JSONResponse({"status": "error", "database": "unavailable"}, status_code=503)
+        return {"status": "ok", "database": "ok"}
 
     return app
 

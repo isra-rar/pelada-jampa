@@ -4,6 +4,8 @@ import warnings
 
 os.environ["PELADA_DATABASE_URL"] = os.environ.get("PELADA_TEST_DATABASE_URL", "sqlite://")
 os.environ["PELADA_SCHEDULER_ENABLED"] = "false"
+# os testes criam muitos usuários do mesmo IP; o limite de tentativas tem testes próprios
+os.environ["PELADA_RATE_LIMIT_ENABLED"] = "false"
 os.environ["PELADA_ENVIRONMENT"] = "test"
 os.environ["PELADA_DRAW_TIME_LIMIT_SECONDS"] = "0.5"
 os.environ["PELADA_ACCESS_TOKEN_EXPIRE_MINUTES"] = str(60 * 24 * 30)

@@ -1,9 +1,10 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SECRET = "dev-secret-change-me"
+DEV_CORS_ORIGIN_REGEX = r"^http://(localhost|127\.0\.0\.1):\d+$"
 
 
 class Settings(BaseSettings):
@@ -23,7 +24,8 @@ class Settings(BaseSettings):
     admins_can_evaluate: bool = True
     confirmation_reminder_hours_before: int = 12
     cors_origins: list[str] = ["http://localhost:4200"]
-    cors_origin_regex: str | None = r"^http://(localhost|127\.0\.0\.1):\d+$"
+    # padrão: qualquer porta de localhost, só fora de produção (ver _defaults_por_ambiente)
+    cors_origin_regex: str | None = None
 
     # --- URLs públicas (links em e-mails e arquivos enviados)
     frontend_url: str = "http://localhost:8080"
@@ -47,16 +49,37 @@ class Settings(BaseSettings):
 
     # --- limite de tentativas em login, cadastro e senha (contadores em memória, por processo)
     rate_limit_enabled: bool = True
+    # cabeçalho com o IP real do cliente posto pelo proxy da hospedagem (ex.: Fly-Client-IP,
+    # CF-Connecting-IP). Vazio: usa o IP da conexão (ou o X-Forwarded-For, se FORWARDED_ALLOW_IPS confiar)
+    client_ip_header: str | None = None
 
     # --- web push (opcional; sem chaves VAPID o push fica desativado)
     vapid_public_key: str | None = None
     vapid_private_key: str | None = None
     vapid_subject: str = "mailto:admin@pelada.local"
 
+    @field_validator("database_url")
+    @classmethod
+    def _driver_psycopg(cls, url: str) -> str:
+        # Railway/Heroku/Render entregam "postgresql://" ou "postgres://"; o SQLAlchemy precisa do driver
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
     @model_validator(mode="after")
-    def _check_secret(self) -> "Settings":
-        if self.environment == "production" and self.jwt_secret == DEFAULT_SECRET:
-            raise ValueError("PELADA_JWT_SECRET deve ser definido em produção")
+    def _defaults_por_ambiente(self) -> "Settings":
+        if self.is_production:
+            if self.jwt_secret == DEFAULT_SECRET:
+                raise ValueError("PELADA_JWT_SECRET deve ser definido em produção")
+            if len(self.jwt_secret.encode()) < 32:
+                raise ValueError("PELADA_JWT_SECRET precisa de pelo menos 32 bytes em produção")
+        elif self.cors_origin_regex is None:
+            self.cors_origin_regex = DEV_CORS_ORIGIN_REGEX
         return self
 
 

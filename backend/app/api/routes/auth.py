@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 
 from app.api.deps import DB, CurrentUser
+from app.core import rate_limit as rl
 from app.core.config import settings
 from app.core.security import create_access_token
 from app.schemas.auth import (
@@ -32,20 +33,30 @@ def _token(user_id: int) -> TokenOut:
 
 
 @router.post("/auth/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-def register(data: RegisterIn, db: DB):
+def register(data: RegisterIn, request: Request, db: DB):
     """Cadastro. Se o administrador já adicionou o e-mail, a conta é reivindicada."""
+    rl.limiter.consume(rl.REGISTER_PER_IP, rl.client_ip(request))
     return users.register(db, data)
 
 
+def _login(request: Request, db: DB, email: str, password: str) -> TokenOut:
+    """Conta só as falhas, por e-mail (protege a conta) e por IP (freia quem testa muitas contas)."""
+    email_key = users.normalize_email(email)
+    email_rule = (rl.LOGIN_FAIL_PER_EMAIL, email_key)
+    with rl.count_failures(email_rule, (rl.LOGIN_FAIL_PER_IP, rl.client_ip(request)), success_clears=email_rule):
+        user = users.authenticate(db, email, password)
+    return _token(user.id)
+
+
 @router.post("/auth/login", response_model=TokenOut)
-def login(data: LoginIn, db: DB):
-    return _token(users.authenticate(db, data.email, data.password).id)
+def login(data: LoginIn, request: Request, db: DB):
+    return _login(request, db, data.email, data.password)
 
 
 @router.post("/auth/token", response_model=TokenOut, include_in_schema=True)
-def token(form: Annotated[OAuth2PasswordRequestForm, Depends()], db: DB):
+def token(form: Annotated[OAuth2PasswordRequestForm, Depends()], request: Request, db: DB):
     """Login no formato OAuth2 (usado pelo botão Authorize do Swagger). `username` = e-mail."""
-    return _token(users.authenticate(db, form.username, form.password).id)
+    return _login(request, db, form.username, form.password)
 
 
 @router.get("/auth/config", response_model=AuthConfigOut)
@@ -55,10 +66,12 @@ def auth_config():
 
 
 @router.post("/auth/google", response_model=TokenOut)
-def login_google(data: GoogleCredentialIn, db: DB):
+def login_google(data: GoogleCredentialIn, request: Request, db: DB):
     """Entrar (ou criar conta) com Google a partir do ID token do Google Identity Services."""
-    identity = google_auth.verify_id_token(data.credential)
-    return _token(users.login_with_google(db, identity).id)
+    with rl.count_failures((rl.GOOGLE_FAIL_PER_IP, rl.client_ip(request))):
+        identity = google_auth.verify_id_token(data.credential)
+        user = users.login_with_google(db, identity)
+    return _token(user.id)
 
 
 @router.post("/me/google", response_model=UserOut)
@@ -73,16 +86,20 @@ def unlink_google(user: CurrentUser, db: DB):
 
 
 @router.post("/auth/password-reset/request", response_model=Message, status_code=status.HTTP_202_ACCEPTED)
-def password_reset_request(data: PasswordResetRequest, db: DB):
+def password_reset_request(data: PasswordResetRequest, request: Request, db: DB):
     """Envia um link de redefinição por e-mail. A resposta é a mesma exista ou não a conta."""
+    rl.limiter.check(rl.RESET_REQUEST_PER_EMAIL, users.normalize_email(data.email))
+    rl.limiter.consume(rl.RESET_REQUEST_PER_IP, rl.client_ip(request))
+    rl.limiter.hit(rl.RESET_REQUEST_PER_EMAIL, users.normalize_email(data.email))
     users.request_password_reset(db, data.email)
     return {"message": "Se o e-mail estiver cadastrado, você receberá um link para redefinir a senha."}
 
 
 @router.post("/auth/password-reset/confirm", response_model=TokenOut)
-def password_reset_confirm(data: PasswordResetConfirm, db: DB):
+def password_reset_confirm(data: PasswordResetConfirm, request: Request, db: DB):
     """Define a nova senha (link de uso único), encerra sessões antigas e já devolve um novo acesso."""
-    user = users.confirm_password_reset(db, data.token, data.new_password)
+    with rl.count_failures((rl.RESET_CONFIRM_FAIL_PER_IP, rl.client_ip(request))):
+        user = users.confirm_password_reset(db, data.token, data.new_password)
     return _token(user.id)
 
 
@@ -93,7 +110,10 @@ def me(user: CurrentUser):
 
 @router.patch("/me", response_model=UserOut)
 def update_me(data: UserUpdate, user: CurrentUser, db: DB):
-    return users.update_me(db, user, data)
+    if not data.new_password:
+        return users.update_me(db, user, data)
+    with rl.count_failures((rl.PASSWORD_CHECK_FAIL_PER_USER, str(user.id))):
+        return users.update_me(db, user, data)
 
 
 @router.post("/me/photo", response_model=UserOut)
@@ -144,5 +164,6 @@ def delete_my_account(data: AccountDeleteIn, user: CurrentUser, db: DB):
     """Exclui a conta: nome, e-mail, telefone, foto, acesso Google e notificações são apagados; as vagas em
     peladas futuras são liberadas. Registros do grupo (pagamentos, presenças, placares, notas) ficam
     anonimizados. Irreversível."""
-    account.delete_account(db, user, password=data.password, confirm=data.confirm)
+    with rl.count_failures((rl.PASSWORD_CHECK_FAIL_PER_USER, str(user.id))):
+        account.delete_account(db, user, password=data.password, confirm=data.confirm)
     return {"message": "Conta excluída. Seus dados pessoais foram removidos."}

@@ -21,14 +21,42 @@ sem disco permanente, use um volume persistente ou elas somem a cada deploy).
 
 | Variável | Para quê |
 | --- | --- |
+| `ENVIRONMENT` | `development` (padrão), `test` ou `production`. Em produção: `/docs` fechado, `JWT_SECRET` obrigatório com 32+ bytes e sem o CORS liberado para localhost |
 | `DATABASE_URL` | SQLite (dev) ou Postgres (`postgresql+psycopg://...`) |
-| `JWT_SECRET` | Obrigatória em produção |
+| `JWT_SECRET` | Obrigatória em produção (gere com `python -c "import secrets; print(secrets.token_urlsafe(48))"`) |
+| `CORS_ORIGINS` | Origens do frontend, em JSON: `["https://app.seudominio.com.br"]` |
+| `CORS_ORIGIN_REGEX` | Fora de produção, o padrão aceita qualquer porta de localhost |
 | `FRONTEND_URL` | Base dos links enviados por e-mail (redefinição de senha) |
 | `PUBLIC_BASE_URL` | URL pública da API, usada nas fotos enviadas (padrão: URL da requisição) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Envio de e-mail. Sem `SMTP_HOST`, o e-mail é escrito no log do servidor |
 | `MEDIA_DIR`, `MAX_UPLOAD_BYTES` | Onde ficam as fotos de perfil (servidas em `/media`) e tamanho máximo |
 | `GOOGLE_CLIENT_ID` | Login com Google. Sem ele, o botão do Google não aparece |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push. Gere com `python scripts/generate_vapid_keys.py`; sem as chaves, só há notificações internas |
+| `RATE_LIMIT_ENABLED` | Limite de tentativas em login, cadastro, redefinição e troca de senha (padrão: ligado) |
+| `CLIENT_IP_HEADER` | Cabeçalho com o IP real do cliente posto pelo proxy da hospedagem (`Fly-Client-IP`, `CF-Connecting-IP`...). Sem ele, o limite por IP vê o IP do proxy |
+
+### Limite de tentativas
+
+Contadores em memória, por janela deslizante. Responde `429` com `Retry-After`.
+
+| O quê | Limite |
+| --- | --- |
+| Login com senha errada | 5 por conta e 30 por IP a cada 15 min (acertar zera o da conta) |
+| Cadastro | 10 por IP por hora |
+| Pedido de redefinição de senha | 3 por e-mail e 10 por IP por hora |
+| Link de redefinição inválido, login Google recusado | 10 e 30 por IP a cada 15 min |
+| Senha atual errada (troca de senha, exclusão de conta) | 5 por usuário a cada 15 min |
+
+Como os contadores ficam no processo, a API deve rodar com **uma instância e um worker** (o agendador de
+lembretes também roda dentro dela). Com mais réplicas, troque por Redis.
+
+### Primeiro administrador da plataforma
+
+Cadastre-se no app e rode, com o mesmo `PELADA_DATABASE_URL` da API:
+
+```sh
+python scripts/make_platform_admin.py voce@exemplo.com            # --remover tira o acesso
+```
 
 ## Módulos
 

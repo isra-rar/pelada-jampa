@@ -64,8 +64,8 @@ def _active_members(db: Session, group_id: int | None, start: datetime, end: dat
     stmt = (
         select(MatchPlayer.member_id)
         .join(Match, Match.id == MatchPlayer.match_id)
-        .where(Match.status.in_(_HELD), MatchPlayer.status == S.PRESENT,
-               Match.starts_at >= start, Match.starts_at < end)
+        .where(Match.status.in_(_HELD), MatchPlayer.status == S.PRESENT, MatchPlayer.hire_id.is_(None),
+               MatchPlayer.is_referee.is_(False), Match.starts_at >= start, Match.starts_at < end)
     )
     if group_id is not None:
         stmt = stmt.where(Match.group_id == group_id)
@@ -73,7 +73,11 @@ def _active_members(db: Session, group_id: int | None, start: datetime, end: dat
 
 
 def _evaluation_metrics(db: Session, matches: list[Match], by_match: dict[int, list[MatchPlayer]]) -> dict:
-    present = {m.id: {mp.member_id for mp in by_match[m.id] if mp.status == S.PRESENT} for m in matches}
+    present = {  # só jogadores: juiz e contratado não avaliam
+        m.id: {mp.member_id for mp in by_match[m.id]
+               if mp.status == S.PRESENT and not mp.is_referee and mp.hire_id is None}
+        for m in matches
+    }
     opened = [m for m in matches if m.evaluation_status != EvaluationStatus.NOT_OPEN and len(present[m.id]) >= 2]
     expected = sum(len(present[m.id]) * (len(present[m.id]) - 1) for m in opened)
     rows = db.execute(

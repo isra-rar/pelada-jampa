@@ -1,5 +1,7 @@
 """Controle financeiro manual (PRD §8). Operações transacionais e auditadas."""
 
+from collections import defaultdict
+from datetime import timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -8,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, Conflict, Forbidden, NotFound
-from app.domain.enums import NotificationType, PaymentStatus
+from app.domain.enums import MemberStatus, NotificationType, PaymentStatus
 from app.models import FootballGroup, GroupMember, Match, Payment, User
 from app.schemas.finance import ChargeCreate, PaymentUpdate
 from app.services import audit, notifications
@@ -65,7 +67,8 @@ def debt_out(p: Payment) -> dict:
 def get_payment(db: Session, group_id: int, payment_id: int, *, lock: bool = False) -> Payment:
     stmt = select(Payment).where(Payment.id == payment_id)
     if lock:
-        stmt = stmt.with_for_update()
+        # of=Payment: as relações carregadas por LEFT JOIN não podem ser travadas no Postgres
+        stmt = stmt.with_for_update(of=Payment)
     p = db.scalar(stmt)
     if p is None or p.group_id != group_id:
         raise NotFound("Pagamento não encontrado")
@@ -94,6 +97,27 @@ def members_with_debt(db: Session, group_id: int, member_ids: list[int], exclude
     return set(db.scalars(stmt).all())
 
 
+def payments_stmt(
+    group_id: int,
+    *,
+    match_id: int | None = None,
+    member_id: int | None = None,
+    status: PaymentStatus | None = None,
+    reported: bool | None = None,
+):
+    """Consulta dos lançamentos do grupo com os filtros da tela (usada na lista e na exportação)."""
+    stmt = select(Payment).join(Match, Match.id == Payment.match_id).where(Payment.group_id == group_id)
+    if reported is not None:
+        stmt = stmt.where(Payment.reported_paid_at.is_not(None) if reported else Payment.reported_paid_at.is_(None))
+    if match_id is not None:
+        stmt = stmt.where(Payment.match_id == match_id)
+    if member_id is not None:
+        stmt = stmt.where(Payment.member_id == member_id)
+    if status is not None:
+        stmt = stmt.where(Payment.status == status)
+    return stmt
+
+
 def list_payments(
     db: Session,
     group_id: int,
@@ -105,15 +129,7 @@ def list_payments(
     page: int = 1,
     size: int = 50,
 ) -> tuple[list[Payment], int]:
-    stmt = select(Payment).join(Match, Match.id == Payment.match_id).where(Payment.group_id == group_id)
-    if reported is not None:
-        stmt = stmt.where(Payment.reported_paid_at.is_not(None) if reported else Payment.reported_paid_at.is_(None))
-    if match_id is not None:
-        stmt = stmt.where(Payment.match_id == match_id)
-    if member_id is not None:
-        stmt = stmt.where(Payment.member_id == member_id)
-    if status is not None:
-        stmt = stmt.where(Payment.status == status)
+    stmt = payments_stmt(group_id, match_id=match_id, member_id=member_id, status=status, reported=reported)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = db.scalars(
         stmt.order_by(Match.starts_at.desc(), Payment.id).offset((page - 1) * size).limit(size)
@@ -227,7 +243,7 @@ def update_payment(db: Session, group: FootballGroup, payment_id: int, data: Pay
 def settle(db: Session, group: FootballGroup, payment_ids: list[int], method, paid_at, notes, actor: User):
     """Quitação de uma ou várias pendências em uma única transação."""
     ids = list(dict.fromkeys(payment_ids))
-    rows = db.scalars(select(Payment).where(Payment.id.in_(ids)).with_for_update()).unique().all()
+    rows = db.scalars(select(Payment).where(Payment.id.in_(ids)).with_for_update(of=Payment)).unique().all()
     found = {p.id: p for p in rows if p.group_id == group.id}
     missing = [i for i in ids if i not in found]
     if missing:
@@ -334,3 +350,68 @@ def report_paid(db: Session, group: FootballGroup, payment_id: int, member: Grou
                      actor_user_id=member.user_id, group_id=group.id)
     db.commit()
     return p
+
+
+# ------------------------------------------------------------------ lembrete periódico de pendências
+
+_BRASILIA = timezone(timedelta(hours=-3))
+# lembretes só em horário comercial (Brasília), para não acordar ninguém
+REMINDER_HOURS = range(9, 21)
+
+
+def send_debt_reminders(db: Session) -> int:
+    """Lembra quem tem pendência em aberto a cada `debt_reminder_days` do grupo (0 desliga).
+
+    Uma mensagem por jogador e grupo, somando tudo o que está em aberto. Ficam de fora os lançamentos que o
+    jogador já informou como pagos (aguardam a conferência do admin), os de peladas que ainda não aconteceram,
+    os de grupos suspensos e os de quem saiu do grupo. O intervalo conta a partir do último lembrete ou da
+    cobrança mais recente (que já gerou aviso), e a data do lembrete fica gravada nos lançamentos: rodar de
+    novo no mesmo intervalo não repete o aviso. Retorna quantos jogadores foram lembrados.
+    """
+    now = utcnow()
+    if now.astimezone(_BRASILIA).hour not in REMINDER_HOURS:
+        return 0
+    rows = db.execute(
+        select(Payment, FootballGroup)
+        .join(FootballGroup, FootballGroup.id == Payment.group_id)
+        .join(Match, Match.id == Payment.match_id)
+        .join(GroupMember, GroupMember.id == Payment.member_id)
+        .join(User, User.id == GroupMember.user_id)
+        .where(
+            Payment.status == PaymentStatus.PENDING,
+            Payment.reported_paid_at.is_(None),
+            Payment.amount_due > Payment.amount_paid,
+            Match.starts_at <= now,
+            FootballGroup.debt_reminder_days > 0,
+            FootballGroup.is_active.is_(True),
+            FootballGroup.suspended_at.is_(None),
+            GroupMember.status == MemberStatus.ACTIVE,
+            User.deleted_at.is_(None),
+        )
+    ).all()
+    by_member: dict[tuple[int, int], list[Payment]] = defaultdict(list)
+    groups: dict[int, FootballGroup] = {}
+    for p, g in rows:
+        by_member[(g.id, p.member_id)].append(p)
+        groups[g.id] = g
+
+    reminded = 0
+    for (group_id, _), items in by_member.items():
+        group = groups[group_id]
+        last = max(p.last_reminder_at or p.created_at for p in items)
+        if now - last < timedelta(days=group.debt_reminder_days):
+            continue
+        total = sum((outstanding(p) for p in items), ZERO)
+        oldest = min(p.match.starts_at for p in items).astimezone(_BRASILIA).strftime("%d/%m")
+        count = f"{len(items)} pendência" + ("s" if len(items) > 1 else "")
+        notifications.notify(
+            db, [items[0].member.user_id], NotificationType.PAYMENT_PENDING, "Lembrete: pagamento pendente",
+            f"Você tem {count} em {group.name} somando R$ {total:.2f} (a mais antiga é de {oldest}). "
+            "O pagamento é feito direto com o organizador; depois toque em \"Já paguei\" no Financeiro.",
+            group_id=group.id,
+        )
+        for p in items:
+            p.last_reminder_at = now
+        reminded += 1
+    db.commit()
+    return reminded

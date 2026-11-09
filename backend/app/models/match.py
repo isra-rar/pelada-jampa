@@ -30,9 +30,13 @@ class MatchSeries(Base):
     first_starts_at: Mapped[datetime] = mapped_column(UTCDateTime)
     duration_minutes: Mapped[int] = mapped_column(Integer)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0"))
+    # cobrança por rateio: o custo total (campo + goleiros/juízes contratados) é dividido entre quem jogou
+    split_cost: Mapped[bool] = mapped_column(Boolean, default=False)
+    field_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)  # campo/quadra (total)
     slots: Mapped[int] = mapped_column(Integer)
     field_players_per_team: Mapped[int] = mapped_column(Integer)
     goalkeepers_per_team: Mapped[int] = mapped_column(Integer, default=1)
+    referee_slots: Mapped[int] = mapped_column(Integer, default=0)  # vagas de juiz (fora das vagas de jogador)
     confirmation_deadline_hours: Mapped[int] = mapped_column(Integer, default=2)  # antes do início
     cancellation_deadline_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evaluation_window_hours: Mapped[int] = mapped_column(Integer, default=24)
@@ -66,9 +70,13 @@ class Match(Base):
     starts_at: Mapped[datetime] = mapped_column(UTCDateTime)
     ends_at: Mapped[datetime] = mapped_column(UTCDateTime)
     price: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0"))
+    # cobrança por rateio: o custo total (campo + goleiros/juízes contratados) é dividido entre quem jogou
+    split_cost: Mapped[bool] = mapped_column(Boolean, default=False)
+    field_cost: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)  # campo/quadra (total)
     slots: Mapped[int] = mapped_column(Integer)
     field_players_per_team: Mapped[int] = mapped_column(Integer)
     goalkeepers_per_team: Mapped[int] = mapped_column(Integer, default=1)
+    referee_slots: Mapped[int] = mapped_column(Integer, default=0)  # vagas de juiz (fora das vagas de jogador)
     confirmation_deadline: Mapped[datetime] = mapped_column(UTCDateTime)
     cancellation_deadline: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     evaluation_window_hours: Mapped[int] = mapped_column(Integer, default=24)
@@ -109,6 +117,12 @@ class MatchPlayer(Base):
     member_id: Mapped[int] = mapped_column(ForeignKey("group_members.id"), index=True)
     status: Mapped[AttendanceStatus] = mapped_column(str_enum(AttendanceStatus), default=AttendanceStatus.PENDING)
     is_goalkeeper: Mapped[bool] = mapped_column(Boolean, default=False)
+    # juiz: confirmado na pelada, mas fora das vagas de jogador, do sorteio, da cobrança e das avaliações
+    is_referee: Mapped[bool] = mapped_column(Boolean, default=False)
+    # goleiro/juiz contratado pelo comércio (não paga a pelada; o valor dele é rateado entre os jogadores)
+    hire_id: Mapped[int | None] = mapped_column(
+        ForeignKey("match_hires.id", name="fk_match_players_hire_id"), nullable=True
+    )
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     waitlist_joined_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     # ordem estrita da fila (desempata entradas no mesmo instante)

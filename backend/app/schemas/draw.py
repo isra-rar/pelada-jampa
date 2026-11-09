@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -92,3 +92,37 @@ class DrawCompareOut(BaseModel):
     average_difference_delta: float | None
     players_changed_team: int
     same_composition: bool
+
+
+class CalibrationGameOut(BaseModel):
+    match_id: int
+    match_date: date
+    home_name: str
+    away_name: str
+    home_score: int
+    away_score: int
+    average_difference: float
+
+
+class DrawCalibrationOut(BaseModel):
+    """O sorteio gera jogos parelhos? Medição com os placares reais e sugestão de pesos (v2.0)."""
+
+    since: date
+    until: date
+    games: int
+    close_games: int
+    close_game_rate: float | None  # jogos decididos por até 1 gol
+    draw_rate: float | None
+    blowout_rate: float | None  # 3 gols ou mais de diferença
+    avg_goal_difference: float | None
+    favorite_games: int
+    favorite_win_rate: float | None  # o time de maior média venceu
+    avg_components: dict[str, float | None]
+    correlations: dict[str, float | None]
+    current_weights: dict[str, float]
+    suggested_weights: dict[str, float] | None
+    blend: float
+    min_games: int
+    status: str  # sem_dados | poucos_dados | bom | regular | ruim
+    message: str
+    recent_games: list[CalibrationGameOut]

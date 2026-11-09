@@ -455,6 +455,7 @@ def calendar(db: Session, venue: Venue, start: date, days: int, *, viewer_group_
         select(MatchPlayer.match_id, func.count()).where(
             MatchPlayer.match_id.in_([m.id for m, _ in matches]),
             MatchPlayer.status.in_((AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)),
+            MatchPlayer.is_referee.is_(False),  # juiz tem vaga própria, fora das vagas de jogador
         ).group_by(MatchPlayer.match_id)
     ).all()) if matches else {}
 

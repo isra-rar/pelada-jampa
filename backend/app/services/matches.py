@@ -2,6 +2,7 @@
 
 import calendar
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -11,6 +12,8 @@ from app.core.errors import BusinessRuleError, Conflict
 from app.domain.enums import (
     AttendanceStatus,
     GroupRole,
+    HireRole,
+    HireStatus,
     MatchStatus,
     MemberStatus,
     NotificationType,
@@ -18,14 +21,16 @@ from app.domain.enums import (
 )
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, MatchSeries, User
 from app.schemas.match import MatchCreate, MatchUpdate, SeriesCreate, SeriesUpdate
-from app.services import audit, notifications, venues
+from app.domain import money
+from app.services import audit, notifications, venue_finance, venues
 from app.services.groups import group_admin_user_ids
 
 DEFAULT_CONFIRMATION_HOURS = 2
 
 _MATCH_AUDIT_FIELDS = [
     "name", "description", "modality", "location", "address", "court_id", "starts_at", "ends_at", "price", "slots",
-    "field_players_per_team", "goalkeepers_per_team", "confirmation_deadline", "cancellation_deadline",
+    "field_players_per_team", "goalkeepers_per_team", "referee_slots", "split_cost", "field_cost",
+    "confirmation_deadline", "cancellation_deadline",
     "evaluation_window_hours", "waitlist_auto_promote", "responsible_admin_ids", "status",
 ]
 
@@ -89,12 +94,17 @@ def create_match(
     cancellation = _aware(data.cancellation_deadline)
     _validate_schedule(starts_at, ends_at, confirmation, cancellation)
     location, address = data.location, data.address
+    field_cost = data.field_cost
     if data.court_id is not None:
         # quadra de espaço vinculado: reserva o horário (falha se ocupado, bloqueado ou fora do funcionamento)
         court = venues.court_for_group(db, group, data.court_id)
         venues.check_slot(db, court, starts_at, ends_at)
         label, venue_address = venues.court_label(db, court)
         location, address = location or label, address or venue_address
+        if field_cost is None and data.split_cost:
+            # rateio: o campo custa o aluguel da quadra (preço combinado ou da quadra × duração)
+            minutes = int((ends_at - starts_at).total_seconds() // 60)
+            field_cost = venue_finance.rent_amount(db, group.id, court, minutes)
     match = Match(
         group_id=group.id,
         series_id=series.id if series else None,
@@ -107,9 +117,12 @@ def create_match(
         starts_at=starts_at,
         ends_at=ends_at,
         price=data.price,
+        split_cost=data.split_cost,
+        field_cost=field_cost,
         slots=data.slots,
         field_players_per_team=data.field_players_per_team,
         goalkeepers_per_team=data.goalkeepers_per_team,
+        referee_slots=data.referee_slots,
         confirmation_deadline=confirmation,
         cancellation_deadline=cancellation,
         evaluation_window_hours=data.evaluation_window_hours,
@@ -173,6 +186,9 @@ def update_match(db: Session, group: FootballGroup, match: Match, data: MatchUpd
         if value is None and key not in ("description", "address", "cancellation_deadline", "court_id"):
             continue
         setattr(match, key, value)
+    if match.split_cost and match.field_cost is None and match.court_id is not None:
+        court = venues.court_for_group(db, group, match.court_id)
+        match.field_cost = venue_finance.rent_amount(db, group.id, court, match.duration_minutes)
     _validate_schedule(match.starts_at, match.ends_at, match.confirmation_deadline, match.cancellation_deadline)
     if match.court_id is not None and (court_changed or (match.starts_at, match.ends_at) != old_times):
         court = venues.court_for_group(db, group, match.court_id)
@@ -200,8 +216,12 @@ def cancel_match(db: Session, group: FootballGroup, match: Match, reason: str | 
     rows = db.execute(
         select(GroupMember.user_id)
         .join(MatchPlayer, MatchPlayer.member_id == GroupMember.id)
-        .where(MatchPlayer.match_id == match.id, MatchPlayer.status != AttendanceStatus.DECLINED)
+        .where(MatchPlayer.match_id == match.id, MatchPlayer.status != AttendanceStatus.DECLINED,
+               GroupMember.status != MemberStatus.GUEST)
     ).scalars().all()
+    from app.services import pros  # evita import circular
+
+    pros.cancel_for_match(db, match, reason)
     notifications.notify(db, rows, NotificationType.MATCH_CANCELLED, f"Pelada cancelada: {match.name}",
                          reason or "A pelada foi cancelada pelo administrador.", group_id=group.id,
                          match_id=match.id)
@@ -247,12 +267,22 @@ def next_match(db: Session, group_id: int) -> Match | None:
 
 
 def attendance_counts(db: Session, match: Match) -> dict:
+    """Contagens por situação. Juízes ficam só em `referees` (não ocupam vaga de jogador)."""
     rows = db.execute(
-        select(MatchPlayer.status, func.count()).where(MatchPlayer.match_id == match.id).group_by(MatchPlayer.status)
+        select(MatchPlayer.status, func.count())
+        .where(MatchPlayer.match_id == match.id, MatchPlayer.is_referee.is_(False))
+        .group_by(MatchPlayer.status)
     ).all()
     counts = {s.value: 0 for s in AttendanceStatus}
     for status, n in rows:
         counts[AttendanceStatus(status).value] = n
+    active = (AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)
+    counts["referees"] = db.scalar(select(func.count()).where(
+        MatchPlayer.match_id == match.id, MatchPlayer.is_referee.is_(True), MatchPlayer.status.in_(active),
+    )) or 0
+    counts["hired"] = db.scalar(select(func.count()).where(
+        MatchPlayer.match_id == match.id, MatchPlayer.hire_id.is_not(None), MatchPlayer.status.in_(active),
+    )) or 0
     offered = db.scalar(
         select(func.count()).where(
             MatchPlayer.match_id == match.id,
@@ -264,11 +294,57 @@ def attendance_counts(db: Session, match: Match) -> dict:
     return counts
 
 
+def cost_out(db: Session, match: Match) -> dict:
+    """Composição do custo e quanto cada jogador paga. Antes do jogo divide pelos confirmados; depois, pelos
+    presentes (juízes e contratados não pagam). No rateio: (campo + contratados) ÷ jogadores; no valor fixo:
+    valor por jogador + parte dos contratados."""
+    from app.models import MatchHire
+
+    hires = db.execute(
+        select(MatchHire.role, MatchHire.price).where(
+            MatchHire.match_id == match.id, MatchHire.status == HireStatus.ACCEPTED
+        )
+    ).all()
+    goalkeepers = sum((Decimal(p) for r, p in hires if r == HireRole.GOALKEEPER), Decimal("0"))
+    referees = sum((Decimal(p) for r, p in hires if r == HireRole.REFEREE), Decimal("0"))
+    counted = AttendanceStatus.PRESENT if match.status == MatchStatus.FINISHED else AttendanceStatus.CONFIRMED
+    players = db.scalar(select(func.count()).where(
+        MatchPlayer.match_id == match.id, MatchPlayer.status == counted,
+        MatchPlayer.is_referee.is_(False), MatchPlayer.hire_id.is_(None),
+    )) or 0
+    field = Decimal(match.field_cost or 0)
+    if match.split_cost:
+        total = field + goalkeepers + referees
+        per_player = money.split(total, players) if players else None
+    else:
+        total = None
+        per_player = Decimal(match.price) + money.split(goalkeepers + referees, players)
+    return {
+        "split": match.split_cost, "field": field, "goalkeepers": goalkeepers, "referees": referees,
+        "total": total, "players": players, "per_player": per_player,
+    }
+
+
+def per_player_if_full(db: Session, match: Match) -> Decimal:
+    """Quanto cada jogador paga com a pelada cheia (para quem olha de fora): no rateio, custo total ÷ vagas de
+    jogador (sem os goleiros contratados); no valor fixo, o próprio valor."""
+    if not match.split_cost:
+        return Decimal(match.price)
+    total = cost_out(db, match)["total"] or Decimal("0")
+    hired = db.scalar(select(func.count()).where(
+        MatchPlayer.match_id == match.id, MatchPlayer.hire_id.is_not(None), MatchPlayer.is_referee.is_(False),
+        MatchPlayer.status.in_((AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)),
+    )) or 0
+    return money.split(total, max(1, match.slots - hired))
+
+
 def match_out(db: Session, match: Match, member: GroupMember | None = None) -> dict:
     from app.schemas.match import MatchOut
 
     data = MatchOut.model_validate(match).model_dump()
     data["counts"] = attendance_counts(db, match)
+    data["cost"] = cost_out(db, match)
+    data["hire_cost"] = data["cost"]["goalkeepers"] + data["cost"]["referees"]
     if member is not None:
         data["my_status"] = db.scalar(
             select(MatchPlayer.status).where(MatchPlayer.match_id == match.id, MatchPlayer.member_id == member.id)
@@ -362,9 +438,12 @@ def generate_occurrences(
             address=series.address,
             court_id=series.court_id,
             price=series.price,
+            split_cost=series.split_cost,
+            field_cost=series.field_cost,
             slots=series.slots,
             field_players_per_team=series.field_players_per_team,
             goalkeepers_per_team=series.goalkeepers_per_team,
+            referee_slots=series.referee_slots,
             evaluation_window_hours=series.evaluation_window_hours,
             responsible_admin_ids=series.responsible_admin_ids or [],
             starts_at=starts_at,

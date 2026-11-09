@@ -40,8 +40,34 @@ sem disco permanente, use um volume persistente ou elas somem a cada deploy).
 - **Avaliação pós-jogo** com janela, antimanipulação e consolidação.
 - **Financeiro** (só controle: o pagamento é feito por fora do app): cobrança por pelada, quitação em lote,
   pendências, isenção/estorno; regras opcionais de cobrança para quem falta sem avisar ou desiste fora do prazo;
-  aviso de "já paguei" do jogador, que o administrador confere e confirma.
+  aviso de "já paguei" do jogador, que o administrador confere e confirma. Lembrete periódico de pendências
+  (`debt_reminder_days` do grupo, padrão 3; 0 desliga): o agendador avisa, das 9h às 21h de Brasília, quem tem
+  dívida em aberto, somando tudo numa mensagem; quem já informou o pagamento não é lembrado. Exportação em CSV
+  para planilha (`GET /groups/{id}/finance/export?view=payments|debtors`, mesmos filtros da lista; separador
+  `;`, vírgula decimal, UTF-8 com BOM, proteção contra fórmulas; a exportação fica na auditoria).
 - **Sorteio inteligente** de times, ajuste manual, comparação e publicação.
+- **Juiz na pelada**: `referee_slots` (0 a 2) abre vagas de juiz fora das vagas de jogador. O membro confirma com
+  `as_referee` ("Apitar"); o juiz fica fora do sorteio, da cobrança, das avaliações e do ranking, e aparece na
+  escalação (aba Times).
+- **Goleiro e juiz de aluguel (comércio)**: anúncio em `PUT /pros/me` (goleiro e/ou juiz, valor por pelada,
+  duração máxima, descrição, cidade/bairro, modalidades, contato e agenda semanal + datas avulsas). Busca
+  pública em `GET /public/pros?role=goalkeeper|referee&date=&start=&end=` (só quem tem agenda livre e não está
+  contratado no horário). O admin da pelada envia o pedido (`POST /matches/{id}/hires`); o profissional aceita
+  em `POST /hires/{id}/accept` e entra na pelada (goleiro vai para o sorteio; juiz ocupa a vaga de juiz). Quem
+  não é do grupo entra como convidado (`guest`), sem acesso ao grupo. O valor dos contratados presentes é
+  rateado entre os jogadores presentes na cobrança da pelada; o pagamento ao profissional é por fora. Pedidos
+  sem resposta expiram quando a pelada começa; cancelar a pelada cancela os pedidos. O telefone de cada lado
+  só aparece com o pedido aceito.
+- **Calibração do sorteio** (v2.0): `GET /groups/{id}/draws/calibration` e `GET /admin/draws/calibration` medem
+  com os placares registrados se os sorteios geram jogos parelhos (por até 1 gol, goleadas, favorito venceu) e
+  sugerem pesos a partir da correlação entre o desequilíbrio deixado em cada critério e o saldo de gols
+  (mínimo de 8 jogos; a medição pesa até 50%). Aplicar = `PATCH /groups/{id}` ou `PATCH /admin/settings`.
+- **Explorar: peladas abertas e comunidades** (v3.0): o grupo escolhe aparecer em Explorar (`discoverable`,
+  com cidade e bairro). Rotas públicas em `/public/discover/...` (peladas futuras com vaga, comunidades,
+  cidades, detalhe) e `GET /public/invites/{token}` (prévia do convite). "Quero jogar"
+  (`POST /discover/matches/{id}/join`) e "Entrar na comunidade" (`POST /discover/groups/{id}/join`) passam
+  pela aprovação de um admin por padrão (`public_join_requires_approval`). Nada público mostra jogadores,
+  notas ou finanças.
 - **Placar e estatísticas**: jogos de cada pelada (placar, gols, assistências, gols contra) e, a partir deles,
   ranking (pontos, gols, assistências, vitórias, aproveitamento, presenças), confronto direto entre jogadores,
   premiações mensais e conquistas. As estatísticas não entram no cálculo das notas do sorteio.

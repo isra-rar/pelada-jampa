@@ -35,7 +35,8 @@ def _require_playable(match: Match) -> None:
 
 def _eligible_ids(db: Session, match: Match, draw: Draw | None) -> set[int]:
     ids = set(db.scalars(
-        select(MatchPlayer.member_id).where(MatchPlayer.match_id == match.id, MatchPlayer.status.in_(_ELIGIBLE))
+        select(MatchPlayer.member_id).where(MatchPlayer.match_id == match.id, MatchPlayer.status.in_(_ELIGIBLE),
+                                            MatchPlayer.is_referee.is_(False))  # juiz não joga
     ).all())
     if draw is not None:
         ids |= {p.member_id for t in draw.teams for p in t.players}

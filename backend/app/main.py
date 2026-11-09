@@ -11,12 +11,14 @@ from app.api.deps import block_writes_in_suspended_group
 from app.api.routes import (
     admin,
     auth,
+    discover,
     draws,
     evaluations,
     finance,
     groups,
     matches,
     notifications,
+    pros,
     push,
     stats,
     venues,
@@ -66,13 +68,19 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],  # nome do arquivo nas exportações (CSV)
     )
     register_error_handlers(app)
-    group_scoped = {groups, matches, evaluations, finance, draws, stats, venues}  # grupo suspenso: só leitura
-    for module in (auth, groups, matches, evaluations, finance, draws, stats, venues, notifications, push, admin):
+    group_scoped = {groups, matches, evaluations, finance, draws, stats, venues, pros}  # grupo suspenso: só leitura
+    for module in (
+        auth, groups, matches, evaluations, finance, draws, stats, venues, discover, pros, notifications, push,
+        admin,
+    ):
         guard = [Depends(block_writes_in_suspended_group)] if module in group_scoped else []
         app.include_router(module.router, prefix=API_PREFIX, dependencies=guard)
     app.include_router(stats.public_router, prefix=API_PREFIX)
+    app.include_router(discover.public_router, prefix=API_PREFIX)
+    app.include_router(pros.public_router, prefix=API_PREFIX)
     # fotos enviadas pelos usuários (o tipo é validado pelo conteúdo no upload)
     app.mount("/media", StaticFiles(directory=media_root()), name="media")
 

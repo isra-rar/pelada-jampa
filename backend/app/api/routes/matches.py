@@ -131,7 +131,7 @@ def my_debts(match_id: int, user: CurrentUser, db: DB):
 def confirm(match_id: int, data: ConfirmIn, user: CurrentUser, db: DB):
     match, member = match_for_member(db, match_id, user)
     group = get_group(db, match.group_id)
-    mp, warnings, debts = attendance.confirm(db, group, match, member, data.as_goalkeeper)
+    mp, warnings, debts = attendance.confirm(db, group, match, member, data.as_goalkeeper, data.as_referee)
     positions = {p.id: i + 1 for i, p in enumerate(attendance.waitlist(db, match))}
     return {
         "participation": attendance.participation_out(mp, waitlist_position=positions.get(mp.id)),

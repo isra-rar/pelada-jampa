@@ -1,6 +1,7 @@
 """Confirmação de presença, lista de espera e registro de presença efetiva (PRD §4)."""
 
 from datetime import timedelta
+from decimal import Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -10,18 +11,21 @@ from app.core.errors import BusinessRuleError, Forbidden
 from app.domain.enums import (
     AttendanceStatus as S,
     EvaluationStatus,
+    HireRole,
+    HireStatus,
     MatchStatus,
     MemberStatus,
     NotificationType,
     PaymentStatus,
 )
+from app.domain import money
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, Payment, User
 from app.schemas.match import AdminParticipationIn, PresenceIn
 from app.services import audit, notifications, payments
 from app.services.access import get_member_in_group
 from app.services.groups import group_admin_user_ids
 
-_MP_FIELDS = ["status", "is_goalkeeper", "blocked", "blocked_reason", "confirmed_at", "waitlist_joined_at",
+_MP_FIELDS = ["status", "is_goalkeeper", "is_referee", "blocked", "blocked_reason", "confirmed_at", "waitlist_joined_at",
               "promotion_offered_at", "late_cancellation"]
 
 
@@ -62,10 +66,33 @@ def _enter_waitlist(db: Session, match: Match, mp: MatchPlayer) -> None:
 
 
 def _occupied(db: Session, match: Match) -> int:
+    """Vagas de jogador ocupadas (juízes têm vaga própria e não contam)."""
     rows = db.scalars(
-        select(MatchPlayer).where(MatchPlayer.match_id == match.id, MatchPlayer.status.in_([S.CONFIRMED, S.WAITLIST]))
+        select(MatchPlayer).where(
+            MatchPlayer.match_id == match.id, MatchPlayer.status.in_([S.CONFIRMED, S.WAITLIST]),
+            MatchPlayer.is_referee.is_(False),
+        )
     ).all()
     return sum(1 for r in rows if r.status == S.CONFIRMED or r.promotion_offered_at is not None)
+
+
+def referees_taken(db: Session, match: Match, exclude_member_id: int | None = None) -> int:
+    """Vagas de juiz ocupadas (confirmados ou já presentes)."""
+    stmt = select(func.count()).where(
+        MatchPlayer.match_id == match.id, MatchPlayer.is_referee.is_(True),
+        MatchPlayer.status.in_([S.CONFIRMED, S.PRESENT]),
+    )
+    if exclude_member_id is not None:
+        stmt = stmt.where(MatchPlayer.member_id != exclude_member_id)
+    return db.scalar(stmt) or 0
+
+
+def _require_referee_slot(db: Session, match: Match, member_id: int) -> None:
+    if referees_taken(db, match, exclude_member_id=member_id) >= match.referee_slots:
+        raise BusinessRuleError(
+            "Não há vaga de juiz nesta pelada" if match.referee_slots == 0 else "A vaga de juiz já está preenchida",
+            code="referee_full",
+        )
 
 
 def _set_confirmed(mp: MatchPlayer) -> None:
@@ -86,6 +113,8 @@ def participation_out(
         "photo_url": mp.member.user.photo_url,
         "status": mp.status,
         "is_goalkeeper": mp.is_goalkeeper,
+        "is_referee": mp.is_referee,
+        "hired": mp.hire_id is not None,
         "confirmed_at": mp.confirmed_at,
         "waitlist_position": waitlist_position,
         "promotion_offered_at": mp.promotion_offered_at,
@@ -122,7 +151,10 @@ def _require_open_for_players(match: Match) -> None:
         raise BusinessRuleError("A pelada já começou", code="match_started")
 
 
-def confirm(db: Session, group: FootballGroup, match: Match, member: GroupMember, as_goalkeeper: bool):
+def confirm(
+    db: Session, group: FootballGroup, match: Match, member: GroupMember, as_goalkeeper: bool,
+    as_referee: bool = False,
+):
     _require_open_for_players(match)
     if _now() > match.confirmation_deadline:
         raise BusinessRuleError("O prazo de confirmação terminou", code="confirmation_closed")
@@ -139,12 +171,34 @@ def confirm(db: Session, group: FootballGroup, match: Match, member: GroupMember
         total = sum(payments.outstanding(p) for p in debts)
         warnings.append(f"Você possui {len(debts)} pendência(s) financeira(s) no valor de R$ {total:.2f}")
 
-    if mp.status in (S.CONFIRMED, S.WAITLIST):
+    if mp.hire_id is not None and mp.status == S.CONFIRMED:
+        return mp, warnings, debts  # contratado: a função vem do pedido aceito
+
+    if as_referee:
+        # juiz não ocupa vaga de jogador, não entra na fila e não paga a pelada
+        _require_referee_slot(db, match, member.id)
+        was_player = mp.status in (S.CONFIRMED, S.WAITLIST) and not mp.is_referee
+        mp.is_goalkeeper = False
+        if mp.status == S.CONFIRMED and mp.is_referee:
+            db.commit()
+            return mp, warnings, debts  # idempotente
+        mp.is_referee = True
+        _set_confirmed(mp)
+        mp.waitlist_seq = mp.waitlist_joined_at = None
+        if was_player:
+            promote_waitlist(db, match)
+        notifications.notify(db, [member.user_id], NotificationType.CONFIRMATION_REGISTERED, "Você vai apitar",
+                             f"Você está confirmado como juiz em {match.name}.", group_id=group.id, match_id=match.id)
+        db.commit()
+        return mp, warnings, debts
+
+    if mp.status in (S.CONFIRMED, S.WAITLIST) and not mp.is_referee:
         mp.is_goalkeeper = as_goalkeeper
         db.commit()
         return mp, warnings, debts  # idempotente
 
     mp.is_goalkeeper = as_goalkeeper
+    mp.is_referee = False  # deixa de apitar para jogar: precisa de vaga de jogador
     mp.responded_at = _now()
     if _occupied(db, match) < match.slots:
         _set_confirmed(mp)
@@ -257,8 +311,18 @@ def admin_update(
         raise BusinessRuleError("Jogador não está ativo no grupo", code="member_inactive")
     mp = _get_or_create(db, match, member)
     before = audit.snapshot(mp, _MP_FIELDS)
+    if mp.hire_id is not None and (data.is_goalkeeper is not None or data.is_referee is not None):
+        raise BusinessRuleError("A função do contratado vem do pedido; cancele o pedido para mudar",
+                                code="hired_player")
+    if data.is_referee is not None and data.is_referee != mp.is_referee:
+        if data.is_referee:
+            _require_referee_slot(db, match, member.id)
+            mp.is_goalkeeper = False
+            if mp.status == S.WAITLIST:
+                _set_confirmed(mp)
+        mp.is_referee = data.is_referee
     if data.is_goalkeeper is not None:
-        mp.is_goalkeeper = data.is_goalkeeper
+        mp.is_goalkeeper = data.is_goalkeeper and not mp.is_referee
     if data.blocked is not None:
         mp.blocked = data.blocked
         mp.blocked_reason = data.blocked_reason if data.blocked else None
@@ -301,6 +365,35 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
     gk_ids = set(data.goalkeepers) if data.goalkeepers is not None else None
     changes: list[dict] = []
 
+    # Juízes e contratados não pagam a pelada. Rateio (split_cost): campo + contratados presentes divididos entre
+    # todos que pagam (presentes e, pelas regras do grupo, quem faltou sem avisar ou desistiu fora do prazo).
+    # Valor fixo: valor por jogador + parte dos contratados para os presentes; penalidades pagam o valor fixo.
+    participants = {
+        mp.member_id: mp for mp in db.scalars(select(MatchPlayer).where(MatchPlayer.match_id == match.id)).all()
+    }
+    staff = {mid for mid, mp in participants.items() if mp.is_referee or mp.hire_id is not None}
+    present_ids, absent_ids = set(data.present), set(data.absent)
+    gk_cost, ref_cost = hires_cost_present(db, match, participants, present_ids)
+    payers = present_ids - staff
+    no_show_payers = {
+        mid for mid in absent_ids - staff if participants.get(mid) is not None and participants[mid].was_confirmed
+    } if group.charge_no_shows else set()
+    late_payers = {
+        mid for mid, mp in participants.items()
+        if mp.status == S.CANCELLED and mp.late_cancellation and mid not in staff | present_ids | absent_ids
+    } if group.charge_late_cancellations else set()
+    if match.split_cost:
+        charged = payers | no_show_payers | late_payers
+        field = Decimal(match.field_cost or 0)
+        share = money.split(field + gk_cost + ref_cost, len(charged))
+        amount = penalty = share
+        charge_note = split_note(field, gk_cost, ref_cost, len(charged))
+    else:
+        charged = set()
+        hired_share = money.split(gk_cost + ref_cost, len(payers))
+        amount, penalty = Decimal(match.price) + hired_share, Decimal(match.price)
+        charge_note = f"Inclui R$ {hired_share:.2f} do rateio de goleiro/juiz contratado" if hired_share > 0 else None
+
     for member_id, status in [(m, S.PRESENT) for m in data.present] + [(m, S.ABSENT) for m in data.absent]:
         member = get_member_in_group(db, group.id, member_id)
         mp = get_participation(db, match, member_id)
@@ -313,14 +406,17 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
         old = mp.status
         mp.status = status
         mp.presence_registered_at = _now()
-        if gk_ids is not None and status == S.PRESENT:
+        if gk_ids is not None and status == S.PRESENT and member_id not in staff:
             mp.is_goalkeeper = member_id in gk_ids
         if old != status:
             changes.append({"member_id": member_id, "from": old, "to": status})
+        if member_id in staff:
+            continue  # juiz/contratado: sem cobrança
 
-        if status == S.PRESENT and match.price > 0:
-            p, created = payments.ensure_charge(db, match, member_id)
+        if status == S.PRESENT and amount > 0:
+            p, created = payments.ensure_charge(db, match, member_id, amount)
             if created:
+                p.notes = charge_note
                 payments_created += 1
                 new_payment_users.append(member.user_id)
             elif p.status == PaymentStatus.REFUNDED and p.notes == payments_auto_note():
@@ -328,10 +424,10 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
                 p.notes = None
         elif status == S.ABSENT:
             p = db.scalar(select(Payment).where(Payment.match_id == match.id, Payment.member_id == member_id))
-            if group.charge_no_shows and mp.was_confirmed and match.price > 0:
+            if group.charge_no_shows and mp.was_confirmed and penalty > 0:
                 # regra do grupo: quem confirmou e faltou paga a pelada mesmo assim
                 if p is None:
-                    p, _ = payments.ensure_charge(db, match, member_id)
+                    p, _ = payments.ensure_charge(db, match, member_id, penalty)
                     p.notes = NO_SHOW_NOTE
                     payments_created += 1
                     new_payment_users.append(member.user_id)
@@ -343,19 +439,31 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
                 p.notes = payments_auto_note()
 
     db.flush()  # autoflush desligado: as consultas abaixo precisam ver as marcações acima
-    if group.charge_late_cancellations and match.price > 0:
+    if group.charge_late_cancellations and penalty > 0:
         late = db.scalars(
             select(MatchPlayer).where(
                 MatchPlayer.match_id == match.id, MatchPlayer.status == S.CANCELLED,
-                MatchPlayer.late_cancellation.is_(True),
+                MatchPlayer.late_cancellation.is_(True), MatchPlayer.is_referee.is_(False),
+                MatchPlayer.hire_id.is_(None),
             )
         ).all()
         for mp in late:
-            p, created = payments.ensure_charge(db, match, mp.member_id)
+            p, created = payments.ensure_charge(db, match, mp.member_id, penalty)
             if created:
                 p.notes = LATE_CANCEL_NOTE
                 payments_created += 1
                 new_payment_users.append(mp.member.user_id)
+
+    if match.split_cost and charged:
+        # correção de presença no rateio: a parte de cada um muda com o número de pagantes
+        db.flush()
+        for p in db.scalars(select(Payment).where(
+            Payment.match_id == match.id, Payment.member_id.in_(charged),
+            Payment.status == PaymentStatus.PENDING, Payment.amount_paid == 0,
+        )).all():
+            p.amount_due = share
+            if p.member_id in payers:
+                p.notes = charge_note
 
     unmarked = db.scalars(
         select(MatchPlayer).where(MatchPlayer.match_id == match.id, MatchPlayer.status == S.CONFIRMED)
@@ -369,10 +477,13 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
     elif match.ended_at is None:
         match.ended_at = match.ends_at
 
-    present_users = [
+    present_users = [  # quem avalia: jogadores presentes (juízes e contratados ficam fora)
         mp.member.user_id
         for mp in db.scalars(
-            select(MatchPlayer).where(MatchPlayer.match_id == match.id, MatchPlayer.status == S.PRESENT)
+            select(MatchPlayer).where(
+                MatchPlayer.match_id == match.id, MatchPlayer.status == S.PRESENT,
+                MatchPlayer.is_referee.is_(False), MatchPlayer.hire_id.is_(None),
+            )
         ).all()
     ]
     if match.evaluation_status == EvaluationStatus.NOT_OPEN:
@@ -392,7 +503,7 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
     if new_payment_users:
         notifications.notify(
             db, new_payment_users, NotificationType.PAYMENT_PENDING, "Pagamento pendente",
-            f"Valor de R$ {match.price:.2f} referente a {match.name}.", group_id=group.id, match_id=match.id,
+            f"Valor de R$ {amount:.2f} referente a {match.name}.", group_id=group.id, match_id=match.id,
         )
     audit.record(db, action="presence.registered", entity_type="match", entity_id=match.id, actor_user_id=actor.id,
                  group_id=group.id, after={"changes": changes, "ended_at": match.ended_at})
@@ -401,6 +512,35 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
 
 
 NO_SHOW_NOTE = "Falta sem aviso (regra do grupo)"
+
+
+def _brl(v: Decimal) -> str:
+    return f"R$ {v:.2f}".replace(".", ",")
+
+
+def split_note(field: Decimal, goalkeepers: Decimal, referees: Decimal, people: int) -> str:
+    """Ex.: "Rateio: campo R$ 150,00 + goleiros R$ 100,00 + juiz R$ 50,00 = R$ 300,00 ÷ 10 jogadores"."""
+    parts = [f"{label} {_brl(v)}" for label, v in (("campo", field), ("goleiros", goalkeepers), ("juiz", referees))
+             if v > 0]
+    total = field + goalkeepers + referees
+    plural = "jogadores" if people != 1 else "jogador"
+    return f"Rateio: {' + '.join(parts) or 'sem custo'} = {_brl(total)} ÷ {people} {plural}"
+
+
+def hires_cost_present(
+    db: Session, match: Match, participants: dict[int, MatchPlayer], present_ids: set[int]
+) -> tuple[Decimal, Decimal]:
+    """Soma dos goleiros e dos juízes contratados (pedido aceito) marcados como presentes."""
+    from app.models import MatchHire
+
+    hire_member = {mp.hire_id: mid for mid, mp in participants.items() if mp.hire_id is not None}
+    hires = db.scalars(
+        select(MatchHire).where(MatchHire.match_id == match.id, MatchHire.status == HireStatus.ACCEPTED)
+    ).all()
+    present = [h for h in hires if hire_member.get(h.id) in present_ids]
+    gk = sum((Decimal(h.price) for h in present if h.role == HireRole.GOALKEEPER), Decimal("0"))
+    ref = sum((Decimal(h.price) for h in present if h.role == HireRole.REFEREE), Decimal("0"))
+    return gk, ref
 LATE_CANCEL_NOTE = "Desistência fora do prazo (regra do grupo)"
 
 

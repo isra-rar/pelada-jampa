@@ -125,6 +125,24 @@ def export_data(db: Session, user: User) -> dict:
             {"venue": name, "role": s.role, "is_active": s.is_active, "since": s.created_at}
             for s, name in venue_roles
         ],
+        **_pro_export(db, user),
+    }
+
+
+def _pro_export(db: Session, user: User) -> dict:
+    """Anúncio de goleiro/juiz e pedidos recebidos."""
+    from app.services import pros
+
+    profile = pros.my_profile(db, user)
+    hires = pros.list_for_pro(db, user)
+    return {
+        "pro_profile": pros.profile_out(db, profile) if profile else None,
+        "pro_hires": [
+            {"match": h.match.name, "starts_at": h.match.starts_at, "role": h.role, "price": h.price,
+             "status": h.status, "message": h.message, "response_note": h.response_note,
+             "created_at": h.created_at}
+            for h in hires
+        ],
     }
 
 
@@ -220,6 +238,10 @@ def delete_account(db: Session, user: User, *, password: str | None, confirm: st
     for staff in db.scalars(select(VenueStaff).where(VenueStaff.user_id == user.id,
                                                      VenueStaff.is_active.is_(True))).all():
         staff.is_active = False  # sai da equipe dos espaços
+
+    from app.services import pros
+
+    pros.retire_profile(db, user)  # anúncio sai do ar e pedidos abertos são cancelados
 
     old_photo = user.photo_url
     user.name = DELETED_NAME

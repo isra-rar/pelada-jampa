@@ -52,6 +52,17 @@ def _month_bounds(month: str | None) -> tuple[str, date, date]:
 # ------------------------------------------------------------------ lançamento
 
 
+def rent_amount(db: Session, group_id: int, court: Court, minutes: int) -> Decimal:
+    """Aluguel de uma pelada: preço por hora combinado com o grupo (ou o da quadra) × duração."""
+    link = db.scalar(
+        select(VenueGroup).where(VenueGroup.group_id == group_id, VenueGroup.venue_id == court.venue_id,
+                                 VenueGroup.status.in_((VenueLinkStatus.ACTIVE, VenueLinkStatus.ENDED)))
+        .order_by(VenueGroup.id.desc()).limit(1)
+    )
+    hourly = link.rent_hourly_price if link and link.rent_hourly_price is not None else court.hourly_price
+    return (Decimal(hourly) * Decimal(minutes) / Decimal(60)).quantize(_CENT)
+
+
 def sync_rent(db: Session, *, venue_id: int | None = None, group_id: int | None = None) -> int:
     """Lança o aluguel das peladas que já começaram e cancela o das que foram canceladas. Não faz commit."""
     stmt = (
@@ -66,13 +77,7 @@ def sync_rent(db: Session, *, venue_id: int | None = None, group_id: int | None 
         stmt = stmt.where(Match.group_id == group_id)
     created = 0
     for match, court in db.execute(stmt).all():
-        link = db.scalar(
-            select(VenueGroup).where(VenueGroup.group_id == match.group_id, VenueGroup.venue_id == court.venue_id,
-                                     VenueGroup.status.in_((VenueLinkStatus.ACTIVE, VenueLinkStatus.ENDED)))
-            .order_by(VenueGroup.id.desc()).limit(1)
-        )
-        hourly = link.rent_hourly_price if link and link.rent_hourly_price is not None else court.hourly_price
-        amount = (Decimal(hourly) * Decimal(match.duration_minutes) / Decimal(60)).quantize(_CENT)
+        amount = rent_amount(db, match.group_id, court, match.duration_minutes)
         db.add(RentCharge(venue_id=court.venue_id, court_id=court.id, group_id=match.group_id, match_id=match.id,
                           amount=amount, status=RentStatus.PENDING if amount > 0 else RentStatus.EXEMPT))
         created += 1
@@ -324,6 +329,7 @@ def dashboard(db: Session, venue: Venue, since: date | None, until: date | None)
         select(MatchPlayer.match_id, func.count()).where(
             MatchPlayer.match_id.in_([m.id for m, _ in held]),
             MatchPlayer.status.in_((AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)),
+            MatchPlayer.is_referee.is_(False),
         ).group_by(MatchPlayer.match_id)
     ).all()) if held else {}
 
@@ -362,6 +368,7 @@ def dashboard(db: Session, venue: Venue, since: date | None, until: date | None)
     confirmed_soon = dict(db.execute(
         select(MatchPlayer.match_id, func.count()).where(
             MatchPlayer.match_id.in_([m.id for m, _, _ in soon]), MatchPlayer.status == AttendanceStatus.CONFIRMED,
+            MatchPlayer.is_referee.is_(False),
         ).group_by(MatchPlayer.match_id)
     ).all()) if soon else {}
     at_risk = [

@@ -1,13 +1,36 @@
-from fastapi import APIRouter, status
+from datetime import date
+
+from fastapi import APIRouter, Query, status
 
 from app.api.deps import DB, CurrentUser
 from app.core.errors import NotFound
 from app.domain.enums import DrawStatus
-from app.schemas.draw import DrawAdjustIn, DrawCompareOut, DrawCreate, DrawOut, DrawSummaryOut
-from app.services import draws
-from app.services.access import get_group, match_for_admin, match_for_member
+from app.schemas.draw import (
+    DrawAdjustIn,
+    DrawCalibrationOut,
+    DrawCompareOut,
+    DrawCreate,
+    DrawOut,
+    DrawSummaryOut,
+)
+from app.services import draw_calibration, draws
+from app.services.access import get_group, match_for_admin, match_for_member, require_admin
 
 router = APIRouter(tags=["Sorteio de times"])
+
+
+@router.get("/groups/{group_id}/draws/calibration", response_model=DrawCalibrationOut)
+def calibration(
+    group_id: int, user: CurrentUser, db: DB,
+    since: date | None = Query(default=None, description="Data inicial (inclusiva); padrão: 365 dias"),
+    until: date | None = Query(default=None, description="Data final (inclusiva); padrão: hoje"),
+):
+    """O sorteio do grupo está gerando jogos parelhos? Mede com os placares registrados e sugere pesos.
+
+    Para aplicar a sugestão, envie `draw_weights` em `PATCH /groups/{group_id}`."""
+    require_admin(db, group_id, user)
+    group = get_group(db, group_id)
+    return draw_calibration.calibration(db, group.id, group.draw_weights, since, until)
 
 
 @router.post("/matches/{match_id}/draws", response_model=DrawOut, status_code=status.HTTP_201_CREATED)

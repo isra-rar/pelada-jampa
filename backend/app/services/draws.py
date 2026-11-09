@@ -7,7 +7,7 @@ from app.core.config import settings
 from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, NotFound
 from app.domain import draw as D
-from app.domain.enums import AttendanceStatus, DrawStatus, MatchStatus, NotificationType, RatingKind
+from app.domain.enums import AttendanceStatus, DrawStatus, MatchStatus, MemberStatus, NotificationType, RatingKind
 from app.models import Draw, FootballGroup, GroupMember, Match, MatchPlayer, Team, TeamPlayer, User
 from app.schemas.draw import DrawCreate, PlayerMove
 from app.services import audit, notifications, ratings
@@ -29,10 +29,13 @@ def _eligible(db: Session, match: Match, data: DrawCreate) -> list[MatchPlayer]:
             mp = by_member.get(mid)
             if mp is None or mp.status not in ok_status:
                 raise BusinessRuleError(f"Jogador {mid} não está confirmado nesta pelada", code="not_eligible")
+            if mp.is_referee:
+                raise BusinessRuleError(f"Jogador {mid} é o juiz da pelada", code="not_eligible")
             chosen.append(mp)
     else:
-        present = [mp for mp in parts if mp.status == AttendanceStatus.PRESENT]
-        chosen = present or [mp for mp in parts if mp.status == AttendanceStatus.CONFIRMED]
+        players = [mp for mp in parts if not mp.is_referee]  # juiz fica fora dos times
+        present = [mp for mp in players if mp.status == AttendanceStatus.PRESENT]
+        chosen = present or [mp for mp in players if mp.status == AttendanceStatus.CONFIRMED]
     unavailable = set(data.unavailable_member_ids)
     chosen = [mp for mp in chosen if mp.member_id not in unavailable]
     # prioridade = ordem de confirmação (define reservas se houver excedente)
@@ -165,6 +168,7 @@ def _participant_user_ids(db: Session, match: Match) -> list[int]:
             .where(
                 MatchPlayer.match_id == match.id,
                 MatchPlayer.status.in_([AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT]),
+                GroupMember.status == MemberStatus.ACTIVE,  # contratados não acessam o grupo
             )
         ).all()
     )

@@ -56,6 +56,18 @@ class FootballGroup(Base):
     public_ranking_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     public_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # --- lembrete de pendências: a cada N dias o jogador com dívida em aberto é avisado (0 = desligado)
+    debt_reminder_days: Mapped[int] = mapped_column(Integer, default=3)
+
+    # --- comunidade pública (descoberta): o grupo aparece em "Explorar" para quem não participa
+    discoverable: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # peladas futuras com vaga aparecem na busca de peladas abertas
+    discover_matches: Mapped[bool] = mapped_column(Boolean, default=True)
+    # quem chega pela descoberta (sem convite) precisa de aprovação de um admin
+    public_join_requires_approval: Mapped[bool] = mapped_column(Boolean, default=True)
+    city: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    neighborhood: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
     created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

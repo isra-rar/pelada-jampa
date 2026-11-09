@@ -29,11 +29,13 @@ def notify(
     *,
     group_id: int | None = None,
     match_id: int | None = None,
+    url: str | None = None,
 ) -> int:
+    """`url` define para onde o push leva (padrão: a pelada ou o grupo)."""
     unique = list(dict.fromkeys(user_ids))  # remove duplicados preservando ordem
     for uid in unique:
         db.add(Notification(user_id=uid, type=type_, title=title, body=body, group_id=group_id, match_id=match_id))
-    push.enqueue(db, unique, title, body, push.target_url(group_id, match_id))
+    push.enqueue(db, unique, title, body, url or push.target_url(group_id, match_id))
     return len(unique)
 
 

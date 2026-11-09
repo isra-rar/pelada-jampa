@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import DB, CurrentUser, Paging, page_of
 from app.core.errors import Forbidden
 from app.domain.enums import PaymentStatus
 from app.schemas.common import Page
 from app.schemas.finance import ChargeCreate, DebtorOut, FinanceSummary, PaymentOut, PaymentUpdate, SettleIn
-from app.services import payments
+from app.services import finance_export, payments
+from app.services.finance_export import ExportView
 from app.services.access import get_group, get_member_in_group, require_admin, require_member
 
 router = APIRouter(tags=["Financeiro"])
@@ -61,6 +62,29 @@ def summary(group_id: int, user: CurrentUser, db: DB, match_id: int | None = Non
 def debtors(group_id: int, user: CurrentUser, db: DB):
     require_admin(db, group_id, user)
     return payments.debtors(db, group_id)
+
+
+@router.get(
+    "/groups/{group_id}/finance/export",
+    response_class=Response,
+    responses={200: {"content": {"text/csv": {}}, "description": "Planilha CSV (separador ;)"}},
+)
+def export(
+    group_id: int, user: CurrentUser, db: DB,
+    view: ExportView = "payments",
+    match_id: int | None = None, member_id: int | None = None,
+    status_: PaymentStatus | None = Query(default=None, alias="status"),
+    reported: bool | None = None,
+):
+    """Exporta os lançamentos (com os mesmos filtros da lista) ou os inadimplentes em CSV para planilha."""
+    require_admin(db, group_id, user)
+    filters = {"match_id": match_id, "member_id": member_id, "status": status_, "reported": reported}
+    content, filename, _ = finance_export.export_csv(db, get_group(db, group_id), view, filters, user)
+    return Response(
+        content=content.encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+    )
 
 
 @router.get("/groups/{group_id}/members/{member_id}/debts")

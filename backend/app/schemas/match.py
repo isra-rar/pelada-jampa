@@ -18,10 +18,17 @@ class _MatchBase(BaseModel):
     location: str | None = Field(default=None, min_length=2, max_length=160)
     address: str | None = Field(default=None, max_length=300)
     court_id: int | None = None
-    price: Decimal = Field(default=Decimal("0"), ge=0, max_digits=10, decimal_places=2)
+    price: Decimal = Field(default=Decimal("0"), ge=0, max_digits=10, decimal_places=2,
+                           description="Valor fixo por jogador (quando não é rateio)")
+    split_cost: bool = Field(default=False, description="Divide o custo total (campo + contratados) entre quem jogar")
+    field_cost: Decimal | None = Field(
+        default=None, ge=0, max_digits=10, decimal_places=2,
+        description="Custo do campo/quadra (total). Vazio com quadra do espaço: calculado pelo aluguel",
+    )
     slots: int = Field(ge=2, le=200)
     field_players_per_team: int = Field(ge=1, le=20)
     goalkeepers_per_team: int = Field(default=1, ge=0, le=2)
+    referee_slots: int = Field(default=0, ge=0, le=2, description="Vagas de juiz (fora das vagas de jogador)")
     evaluation_window_hours: EvaluationWindow = 24
     responsible_admin_ids: list[int] = Field(default_factory=list)
 
@@ -58,9 +65,12 @@ class MatchUpdate(BaseModel):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+    split_cost: bool | None = None
+    field_cost: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     slots: int | None = Field(default=None, ge=2, le=200)
     field_players_per_team: int | None = Field(default=None, ge=1, le=20)
     goalkeepers_per_team: int | None = Field(default=None, ge=0, le=2)
+    referee_slots: int | None = Field(default=None, ge=0, le=2)
     confirmation_deadline: datetime | None = None
     cancellation_deadline: datetime | None = None
     evaluation_window_hours: EvaluationWindow | None = None
@@ -81,6 +91,8 @@ class AttendanceCounts(BaseModel):
     present: int = 0
     absent: int = 0
     available_slots: int = 0
+    referees: int = 0  # juízes confirmados (não ocupam vaga de jogador)
+    hired: int = 0  # goleiros/juízes contratados confirmados
 
 
 class MatchOut(ORMModel):
@@ -97,9 +109,12 @@ class MatchOut(ORMModel):
     ends_at: datetime
     duration_minutes: int
     price: Decimal
+    split_cost: bool = False
+    field_cost: Decimal | None = None
     slots: int
     field_players_per_team: int
     goalkeepers_per_team: int
+    referee_slots: int = 0
     confirmation_deadline: datetime
     cancellation_deadline: datetime | None
     evaluation_window_hours: int
@@ -115,6 +130,21 @@ class MatchOut(ORMModel):
     cancel_reason: str | None
     counts: AttendanceCounts | None = None
     my_status: AttendanceStatus | None = None
+    # soma dos goleiros/juízes contratados (aceitos): rateada entre os jogadores presentes na cobrança
+    hire_cost: Decimal = Decimal("0")
+    cost: "MatchCost | None" = None
+
+
+class MatchCost(BaseModel):
+    """Composição do custo da pelada e quanto cada jogador paga (estimado até registrar a presença)."""
+
+    split: bool  # rateio do custo total; falso = valor fixo por jogador (+ rateio dos contratados)
+    field: Decimal  # campo/quadra
+    goalkeepers: Decimal  # goleiros contratados
+    referees: Decimal  # juízes contratados
+    total: Decimal | None  # campo + contratados (só no rateio)
+    players: int  # entre quantos se divide (confirmados; depois do jogo, presentes)
+    per_player: Decimal | None  # quanto cada um paga (nulo sem jogadores)
 
 
 class SeriesCreate(_MatchBase):
@@ -136,9 +166,12 @@ class SeriesUpdate(BaseModel):
     court_id: int | None = Field(default=None, description="null remove a quadra das próximas ocorrências")
     duration_minutes: int | None = Field(default=None, ge=15, le=600)
     price: Decimal | None = Field(default=None, ge=0)
+    split_cost: bool | None = None
+    field_cost: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
     slots: int | None = Field(default=None, ge=2, le=200)
     field_players_per_team: int | None = Field(default=None, ge=1, le=20)
     goalkeepers_per_team: int | None = Field(default=None, ge=0, le=2)
+    referee_slots: int | None = Field(default=None, ge=0, le=2)
     confirmation_deadline_hours: int | None = Field(default=None, ge=0)
     cancellation_deadline_hours: int | None = Field(default=None, ge=0)
     evaluation_window_hours: EvaluationWindow | None = None
@@ -160,9 +193,12 @@ class SeriesOut(ORMModel):
     first_starts_at: datetime
     duration_minutes: int
     price: Decimal
+    split_cost: bool = False
+    field_cost: Decimal | None = None
     slots: int
     field_players_per_team: int
     goalkeepers_per_team: int
+    referee_slots: int = 0
     confirmation_deadline_hours: int
     cancellation_deadline_hours: int | None
     evaluation_window_hours: int
@@ -186,6 +222,8 @@ class MatchPlayerOut(BaseModel):
     photo_url: str | None
     status: AttendanceStatus
     is_goalkeeper: bool
+    is_referee: bool = False
+    hired: bool = False  # goleiro/juiz contratado pelo comércio
     confirmed_at: datetime | None
     waitlist_position: int | None
     promotion_offered_at: datetime | None
@@ -208,6 +246,13 @@ class DebtOut(BaseModel):
 
 class ConfirmIn(BaseModel):
     as_goalkeeper: bool = False
+    as_referee: bool = False  # vai apitar (usa uma vaga de juiz, não de jogador)
+
+    @model_validator(mode="after")
+    def _one_role(self) -> "ConfirmIn":
+        if self.as_goalkeeper and self.as_referee:
+            raise ValueError("Escolha goleiro ou juiz, não os dois")
+        return self
 
 
 class ConfirmOut(BaseModel):
@@ -219,6 +264,7 @@ class ConfirmOut(BaseModel):
 class AdminParticipationIn(BaseModel):
     status: AttendanceStatus | None = None
     is_goalkeeper: bool | None = None
+    is_referee: bool | None = None
     blocked: bool | None = None
     blocked_reason: str | None = Field(default=None, max_length=300)
     reason: str | None = Field(default=None, max_length=300)
@@ -241,3 +287,6 @@ class PresenceOut(BaseModel):
     match: MatchOut
     payments_created: int
     warnings: list[str]
+
+
+MatchOut.model_rebuild()

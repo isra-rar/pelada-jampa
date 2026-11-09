@@ -71,7 +71,7 @@ def _presences(db: Session, group_id: int, start: datetime | None, end: datetime
         select(MatchPlayer.member_id)
         .join(Match, Match.id == MatchPlayer.match_id)
         .where(Match.group_id == group_id, Match.status == MatchStatus.FINISHED,
-               MatchPlayer.status == AttendanceStatus.PRESENT)
+               MatchPlayer.status == AttendanceStatus.PRESENT, MatchPlayer.is_referee.is_(False))
     )
     if start is not None:
         stmt = stmt.where(Match.starts_at >= start)
@@ -150,8 +150,8 @@ def ranking(
     rows = []
     for m in members:
         s = stats.get(m.id)
-        if m.status != MemberStatus.ACTIVE and s is None:
-            continue
+        if m.status == MemberStatus.GUEST or (m.status != MemberStatus.ACTIVE and s is None):
+            continue  # goleiro/juiz contratado não entra no ranking do grupo
         s = s or _Acc().out()
         if only_active_players and s["games"] == 0 and s["matches"] == 0:
             continue

@@ -33,8 +33,10 @@ _GROUP_AUDIT_FIELDS = [
     "goalkeeper_rating_mode", "initial_rating", "min_evaluations_to_consolidate", "rating_match_weight",
     "provisional_match_weight", "min_evaluators_full_weight", "outlier_threshold", "exclude_outliers",
     "draw_weights", "charge_no_shows", "charge_late_cancellations", "public_ranking_enabled",
+    "debt_reminder_days", "discoverable", "discover_matches", "public_join_requires_approval", "city",
+    "neighborhood",
 ]
-_NULLABLE_SETTINGS = {"description"}
+_NULLABLE_SETTINGS = {"description", "city", "neighborhood"}
 
 
 def seed_default_skills(db: Session) -> None:
@@ -171,12 +173,12 @@ def on_member_deactivated(db: Session, member: GroupMember) -> None:
         db.delete(row)
 
 
-def join_by_token(db: Session, user: User, token: str) -> GroupMember:
-    group = db.scalar(select(FootballGroup).where(FootballGroup.invite_token == token))
-    if group is None or not group.is_active:
-        raise NotFound("Convite inválido ou expirado", code="invalid_invite")
+def _join(
+    db: Session, user: User, group: FootballGroup, *, needs_approval: bool, action: str, request_text: str | None
+) -> GroupMember:
+    """Entrada no grupo (convite ou descoberta). Não faz commit; quem chama decide."""
     member = db.scalar(select(GroupMember).where(GroupMember.group_id == group.id, GroupMember.user_id == user.id))
-    target_status = MemberStatus.PENDING if group.require_join_approval else MemberStatus.ACTIVE
+    target_status = MemberStatus.PENDING if needs_approval else MemberStatus.ACTIVE
     if member is not None:
         if member.status in (MemberStatus.ACTIVE, MemberStatus.PENDING):
             return member
@@ -192,18 +194,38 @@ def join_by_token(db: Session, user: User, token: str) -> GroupMember:
         on_member_activated(db, group, member)
     else:
         notifications.notify(db, group_admin_user_ids(db, group.id), NotificationType.MEMBERSHIP,
-                             "Nova solicitação de entrada", f"{user.name} pediu para entrar em {group.name}.",
+                             "Nova solicitação de entrada",
+                             request_text or f"{user.name} pediu para entrar em {group.name}.",
                              group_id=group.id)
-    audit.record(db, action="member.joined_by_invite", entity_type="group_member", entity_id=member.id,
+    audit.record(db, action=action, entity_type="group_member", entity_id=member.id,
                  actor_user_id=user.id, group_id=group.id, after={"status": member.status})
+    return member
+
+
+def join_by_token(db: Session, user: User, token: str) -> GroupMember:
+    group = db.scalar(select(FootballGroup).where(FootballGroup.invite_token == token))
+    if group is None or not group.is_active:
+        raise NotFound("Convite inválido ou expirado", code="invalid_invite")
+    member = _join(db, user, group, needs_approval=group.require_join_approval, action="member.joined_by_invite",
+                   request_text=None)
     db.commit()
     return member
+
+
+def join_public(db: Session, user: User, group: FootballGroup, request_text: str | None = None) -> GroupMember:
+    """Entrada pela página pública da comunidade (sem convite). Por padrão passa pela aprovação de um admin
+    (`public_join_requires_approval`). Não faz commit."""
+    text = request_text or f"{user.name} encontrou {group.name} em Explorar e pediu para entrar."
+    return _join(db, user, group, needs_approval=group.public_join_requires_approval,
+                 action="member.joined_by_discovery", request_text=text)
 
 
 def list_members(db: Session, group_id: int, *, status: MemberStatus | None, search: str | None) -> list[GroupMember]:
     stmt = select(GroupMember).join(User, User.id == GroupMember.user_id).where(GroupMember.group_id == group_id)
     if status:
         stmt = stmt.where(GroupMember.status == status)
+    else:
+        stmt = stmt.where(GroupMember.status != MemberStatus.GUEST)  # contratados não são membros
     if search:
         like = f"%{search.lower()}%"
         stmt = stmt.where(or_(func.lower(User.name).like(like), func.lower(GroupMember.nickname).like(like)))

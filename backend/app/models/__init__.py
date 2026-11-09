@@ -5,6 +5,7 @@ from app.models.match import Match, MatchPlayer, MatchSeries
 from app.models.misc import AuditLog, Notification
 from app.models.payment import Payment
 from app.models.platform import PlatformSettings
+from app.models.pro import MatchHire, ProAvailability, ProProfile
 from app.models.rating import PlayerRating, PlayerRatingHistory
 from app.models.stats import MatchGame, MatchGoal
 from app.models.user import PasswordResetToken, PushSubscription, User
@@ -21,6 +22,7 @@ __all__ = [
     "Match",
     "MatchGame",
     "MatchGoal",
+    "MatchHire",
     "MatchPlayer",
     "MatchSeries",
     "Notification",
@@ -29,6 +31,8 @@ __all__ = [
     "PlatformSettings",
     "PlayerRating",
     "PlayerRatingHistory",
+    "ProAvailability",
+    "ProProfile",
     "PushSubscription",
     "RentCharge",
     "SpecialSkill",

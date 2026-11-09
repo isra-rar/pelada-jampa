@@ -18,9 +18,11 @@ from app.schemas.admin import (
 )
 from app.schemas.auth import PlatformUserUpdate, UserOut
 from app.schemas.common import Page
+from app.schemas.draw import DrawCalibrationOut
 from app.schemas.metrics import PlatformMetricsOut
 from app.schemas.platform import PlatformSettingsOut, PlatformSettingsUpdate
 from app.services import admin_groups, audit, metrics, platform
+from app.services import draw_calibration as draw_calibration_service
 from app.services.access import get_group, get_member_in_group
 
 router = APIRouter(prefix="/admin", tags=["Administração da plataforma"])
@@ -118,3 +120,16 @@ def platform_metrics(
 ):
     """Usuários, grupos ativos, retenção de grupos e peladas realizadas no período."""
     return metrics.platform_metrics(db, since, until)
+
+
+@router.get("/draws/calibration", response_model=DrawCalibrationOut)
+def draw_calibration(
+    admin: PlatformAdmin, db: DB,
+    since: date | None = Query(default=None, description="Data inicial (inclusiva); padrão: 365 dias"),
+    until: date | None = Query(default=None, description="Data final (inclusiva); padrão: hoje"),
+):
+    """Calibração do sorteio com os placares de todos os grupos, comparada aos pesos padrão de grupos novos.
+
+    Para aplicar a sugestão, altere `group_defaults.draw_weights` em `PATCH /admin/settings`."""
+    current = platform.group_defaults(db)["draw_weights"]
+    return draw_calibration_service.calibration(db, None, current, since, until)

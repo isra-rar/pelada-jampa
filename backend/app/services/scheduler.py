@@ -1,5 +1,6 @@
-"""Tarefas periódicas: encerramento de avaliações, lembretes, expiração de ofertas de vaga, geração das
-próximas ocorrências das peladas recorrentes e lançamento do aluguel das quadras.
+"""Tarefas periódicas: encerramento de avaliações, lembretes (confirmação, avaliação e pendências financeiras),
+expiração de ofertas de vaga, geração das próximas ocorrências das peladas recorrentes e lançamento do aluguel
+das quadras.
 
 Todas as tarefas são idempotentes; rodar em mais de uma instância não gera efeitos duplicados
 porque o encerramento usa lock de linha e os lembretes marcam a data de envio.
@@ -16,7 +17,7 @@ from app.core.config import settings
 from app.core.db import SessionLocal, utcnow
 from app.domain.enums import AttendanceStatus, MatchStatus, NotificationType
 from app.models import FootballGroup, Match, MatchPlayer
-from app.services import attendance, evaluations, matches, notifications, venue_finance
+from app.services import attendance, evaluations, matches, notifications, payments, pros, venue_finance
 
 log = logging.getLogger("pelada.scheduler")
 
@@ -83,6 +84,8 @@ def run_jobs_once() -> dict:
             ("offers_expired", expire_waitlist_offers),
             ("series_generated", matches.auto_generate_due),
             ("rent_charges", venue_finance.sync_rent_job),
+            ("debt_reminders", payments.send_debt_reminders),
+            ("hires_expired", pros.expire_due),
         ):
             try:
                 results[name] = job(db)

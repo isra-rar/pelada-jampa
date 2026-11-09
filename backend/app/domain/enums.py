@@ -11,6 +11,8 @@ class MemberStatus(StrEnum):
     ACTIVE = "active"
     INACTIVE = "inactive"
     REMOVED = "removed"
+    # goleiro/juiz contratado: participa só das peladas para as quais foi contratado, sem acesso ao grupo
+    GUEST = "guest"
 
 
 class Position(StrEnum):
@@ -101,6 +103,7 @@ class NotificationType(StrEnum):
     RESULT_REGISTERED = "result_registered"
     GROUP_STATUS = "group_status"  # suspensão/reativação pela administração da plataforma
     VENUE = "venue"  # espaço (quadra): vínculo com o grupo e aluguel
+    HIRE = "hire"  # goleiro/juiz de aluguel: pedidos e respostas
 
 
 class VenueRole(StrEnum):
@@ -130,3 +133,16 @@ class RentStatus(StrEnum):
 class GameStatus(StrEnum):
     LIVE = "live"  # em andamento: cronômetro correndo e gols lançados um a um
     FINISHED = "finished"
+
+
+class HireRole(StrEnum):
+    GOALKEEPER = "goalkeeper"
+    REFEREE = "referee"
+
+
+class HireStatus(StrEnum):
+    PENDING = "pending"  # aguardando o profissional
+    ACCEPTED = "accepted"  # entrou na pelada
+    DECLINED = "declined"
+    CANCELLED = "cancelled"  # pelo organizador, pelo profissional ou com a pelada
+    EXPIRED = "expired"  # a pelada começou sem resposta

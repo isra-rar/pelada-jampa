@@ -26,6 +26,20 @@ class GroupSettings(BaseModel):
     charge_no_shows: bool | None = None
     charge_late_cancellations: bool | None = None
     public_ranking_enabled: bool | None = None
+    debt_reminder_days: int | None = Field(default=None, ge=0, le=60)
+    discoverable: bool | None = None
+    discover_matches: bool | None = None
+    public_join_requires_approval: bool | None = None
+    city: str | None = Field(default=None, max_length=80)
+    neighborhood: str | None = Field(default=None, max_length=80)
+
+    @field_validator("city", "neighborhood")
+    @classmethod
+    def _strip(cls, v: str | None):
+        if v is None:
+            return v
+        v = " ".join(v.split())
+        return v or None
 
     @field_validator("draw_weights")
     @classmethod
@@ -77,6 +91,12 @@ class GroupOut(ORMModel):
     charge_late_cancellations: bool = False
     public_ranking_enabled: bool = False
     public_token: str | None = None
+    debt_reminder_days: int = 3
+    discoverable: bool = False
+    discover_matches: bool = True
+    public_join_requires_approval: bool = True
+    city: str | None = None
+    neighborhood: str | None = None
     suspended_at: datetime | None = None
     suspension_reason: str | None = None
     created_at: datetime

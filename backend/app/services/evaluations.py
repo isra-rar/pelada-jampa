@@ -30,7 +30,10 @@ def _kind(mp: MatchPlayer) -> RatingKind:
 
 def _present(db: Session, match: Match) -> dict[int, MatchPlayer]:
     rows = db.scalars(
-        select(MatchPlayer).where(MatchPlayer.match_id == match.id, MatchPlayer.status == AttendanceStatus.PRESENT)
+        select(MatchPlayer).where(
+            MatchPlayer.match_id == match.id, MatchPlayer.status == AttendanceStatus.PRESENT,
+            MatchPlayer.is_referee.is_(False), MatchPlayer.hire_id.is_(None),  # juiz e contratado não avaliam
+        )
     ).all()
     return {mp.member_id: mp for mp in rows}
 

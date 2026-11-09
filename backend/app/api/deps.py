@@ -34,6 +34,19 @@ def get_current_user(db: DB, token: Annotated[str | None, Depends(oauth2_scheme)
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def get_optional_user(db: DB, token: Annotated[str | None, Depends(oauth2_scheme)]) -> User | None:
+    """Usuário logado, se houver. Páginas públicas usam para mostrar a situação de quem já participa."""
+    if not token:
+        return None
+    try:
+        return get_current_user(db, token)
+    except Unauthorized:
+        return None
+
+
+OptionalUser = Annotated[User | None, Depends(get_optional_user)]
+
+
 def require_platform_admin(user: CurrentUser) -> User:
     if not user.is_platform_admin:
         raise Forbidden("Apenas administradores da plataforma")

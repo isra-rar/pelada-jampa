@@ -7,7 +7,7 @@
 #
 # Antes do deploy, faça commit nos dois repositórios. O make não faz commit por você.
 
-SHELL := bash
+SHELL := $(firstword $(wildcard C:/PROGRA~1/Git/bin/bash.exe /usr/bin/bash /bin/bash) bash)
 export MSYS_NO_PATHCONV := 1
 
 # atalho do ~/.ssh/config (root@143.95.184.202, porta 22022)
@@ -35,10 +35,10 @@ checar:
 	@dirty=0; \
 	for d in . $(FRONT); do \
 	  if [ -n "$$(git -C $$d status --porcelain --untracked-files=no)" ]; then \
-	    echo "Há alterações sem commit em $$d:"; git -C $$d status -s --untracked-files=no; dirty=1; \
+	    echo "Ha alteracoes sem commit em $$d:"; git -C $$d status -s --untracked-files=no; dirty=1; \
 	  fi; \
 	done; \
-	[ $$dirty -eq 0 ] || { echo "Faça commit antes (ou use: make deploy FORCE=1 para ignorar)."; [ -n "$(FORCE)" ]; }
+	[ $$dirty -eq 0 ] || { echo "Faca commit antes (ou use: make deploy FORCE=1 para ignorar)."; [ -n "$(FORCE)" ]; }
 
 push: checar
 	exec git push origin main

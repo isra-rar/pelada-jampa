@@ -30,7 +30,7 @@ from app.core.db import SessionLocal
 from app.core.errors import register_error_handlers
 from app.services.groups import seed_default_skills
 from app.services.media import media_root
-from app.services.scheduler import scheduler_loop
+from app.services.scheduler import scheduler_loop, scheduler_status
 
 logging.basicConfig(level=logging.INFO)
 
@@ -92,14 +92,19 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["Infra"])
     def health():
-        """Checagem da hospedagem: responde 503 se o banco não estiver acessível."""
+        """Para a hospedagem e o monitor de disponibilidade: 503 se o banco não responde ou se o agendador
+        (lembretes, encerramento de avaliações, cobranças) parou de rodar."""
+        body = {"status": "ok", "database": "ok", "scheduler": scheduler_status()}
         try:
             with SessionLocal() as db:
                 db.execute(text("SELECT 1"))
         except Exception:
             logging.getLogger(__name__).exception("health: banco indisponível")
-            return JSONResponse({"status": "error", "database": "unavailable"}, status_code=503)
-        return {"status": "ok", "database": "ok"}
+            body["database"] = "unavailable"
+        if body["database"] != "ok" or body["scheduler"] in ("stale", "stopped"):
+            body["status"] = "error"
+            return JSONResponse(body, status_code=503)
+        return body
 
     return app
 

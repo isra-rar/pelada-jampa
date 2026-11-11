@@ -8,3 +8,4 @@ __pycache__/
 
 # o frontend tem repositório próprio (ligado ao Lovable)
 frontend/
+*.db.bak*

@@ -1,0 +1,30 @@
+# Caddy na VPS: HTTPS automático (Let's Encrypt) e repasse para os processos do PM2.
+# Um domínio só para app e API: sem CORS e um certificado. Troque o domínio abaixo; o registro DNS
+# (A/AAAA) precisa apontar para a VPS antes de recarregar o Caddy, senão o certificado não sai.
+#
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+pelada.seudominio.com.br {
+	encode zstd gzip
+
+	# API (pm2: pelada-api). /media são as fotos de perfil; /health é o monitor de disponibilidade.
+	@api path /api/* /media/* /health
+	handle @api {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# frontend (pm2: pelada-web)
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	# o navegador precisa sempre conferir o service worker, senão o aviso de versão nova atrasa
+	header /sw.js Cache-Control "no-cache"
+
+	log {
+		output file /var/log/caddy/pelada.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

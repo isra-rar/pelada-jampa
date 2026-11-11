@@ -8,6 +8,8 @@ porque o encerramento usa lock de linha e os lembretes marcam a data de envio.
 
 import asyncio
 import logging
+import time
+from dataclasses import dataclass
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -95,9 +97,37 @@ def run_jobs_once() -> dict:
     return results
 
 
+@dataclass
+class Heartbeat:
+    started_at: float | None = None  # time.monotonic()
+    last_ok_at: float | None = None
+
+
+heartbeat = Heartbeat()
+
+
+def scheduler_status() -> str:
+    """`ok`, `disabled`, `stopped` (não iniciou) ou `stale` (sem ciclo completo há muito tempo)."""
+    if not settings.scheduler_enabled:
+        return "disabled"
+    ref = heartbeat.last_ok_at or heartbeat.started_at
+    if ref is None:
+        return "stopped"
+    limit = max(5 * settings.scheduler_interval_seconds, 300)
+    return "ok" if time.monotonic() - ref <= limit else "stale"
+
+
 async def scheduler_loop(stop: asyncio.Event) -> None:
+    heartbeat.started_at = time.monotonic()
+    heartbeat.last_ok_at = None
     while not stop.is_set():
-        await asyncio.to_thread(run_jobs_once)
+        try:
+            await asyncio.to_thread(run_jobs_once)
+            heartbeat.last_ok_at = time.monotonic()
+        except Exception:
+            # ex.: banco fora do ar por um instante. Sem isto a tarefa morria calada e os lembretes paravam
+            # até a API reiniciar; agora tenta de novo no próximo ciclo e o /health acusa se não voltar.
+            log.exception("Falha no ciclo do agendador; nova tentativa no próximo ciclo")
         try:
             await asyncio.wait_for(stop.wait(), timeout=settings.scheduler_interval_seconds)
         except TimeoutError:

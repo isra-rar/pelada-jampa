@@ -22,6 +22,7 @@ from app.schemas.venue import (
     RentChargeOut,
     RentChargeUpdate,
     RentListOut,
+    RentSettleGroupIn,
     RentSettleIn,
     StaffIn,
     StaffOut,
@@ -230,10 +231,13 @@ def create_weekly_pelada(venue_id: int, data: VenuePeladaCreate, user: CurrentUs
 @router.get("/venues/{venue_id}/rent", response_model=RentListOut)
 def venue_rent(venue_id: int, user: CurrentUser, db: DB,
                month: str | None = Query(default=None, description="AAAA-MM; padrão: mês atual"),
-               status_: RentStatus | None = Query(default=None, alias="status"), group_id: int | None = None):
-    """Aluguel do mês (pelas datas das peladas), com totais e resumo por grupo."""
+               status_: RentStatus | None = Query(default=None, alias="status"), group_id: int | None = None,
+               page: int = Query(default=1, ge=1), size: int = Query(default=50, ge=1, le=200)):
+    """Aluguel do mês (pelas datas das peladas): totais e fechamento por grupo do mês inteiro; as peladas vêm
+    paginadas, com filtro opcional de grupo e situação."""
     venue, _ = venues.require_staff(db, venue_id, user)
-    return venue_finance.list_rent(db, venue, month=month, status=status_, group_id=group_id)
+    return venue_finance.list_rent(db, venue, month=month, status=status_, group_id=group_id, page=page,
+                                   size=size)
 
 
 @router.patch("/venues/{venue_id}/rent/{charge_id}", response_model=RentChargeOut)
@@ -248,6 +252,14 @@ def settle_rent(venue_id: int, data: RentSettleIn, user: CurrentUser, db: DB):
     """Quita vários aluguéis de uma vez (ex.: fechamento do mês de um grupo)."""
     venue, _ = venues.require_staff(db, venue_id, user)
     charges = venue_finance.settle(db, venue, data.charge_ids, data.method, user)
+    return [venue_finance.charge_out(db, c) for c in charges]
+
+
+@router.post("/venues/{venue_id}/rent/settle-group", response_model=list[RentChargeOut])
+def settle_rent_group(venue_id: int, data: RentSettleGroupIn, user: CurrentUser, db: DB):
+    """Fechamento do mês de um grupo: quita todos os aluguéis pendentes dele no mês."""
+    venue, _ = venues.require_staff(db, venue_id, user)
+    charges = venue_finance.settle_group_month(db, venue, data.group_id, data.month, data.method, user)
     return [venue_finance.charge_out(db, c) for c in charges]
 
 

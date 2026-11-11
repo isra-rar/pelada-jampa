@@ -362,6 +362,12 @@ class RentChargeUpdate(BaseModel):
     notes: str | None = Field(default=None, max_length=300)
 
 
+class RentSettleGroupIn(BaseModel):
+    group_id: int
+    month: str | None = Field(default=None, description="AAAA-MM; padrão: mês atual")
+    method: str | None = Field(default=None, max_length=40)
+
+
 class RentSettleIn(BaseModel):
     charge_ids: list[int] = Field(min_length=1, max_length=200)
     method: str | None = Field(default=None, max_length=40)
@@ -383,8 +389,11 @@ class RentListOut(BaseModel):
     paid: Decimal
     pending: Decimal
     exempt: Decimal
-    items: list[RentChargeOut]
-    groups: list[RentGroupSummary]
+    items: list[RentChargeOut]  # paginado (filtros de grupo e situação valem só aqui)
+    items_total: int = 0
+    page: int = 1
+    size: int = 50
+    groups: list[RentGroupSummary]  # fechamento do mês inteiro
 
 
 class GroupRentOut(BaseModel):
@@ -545,4 +554,7 @@ class VenuesMetricsOut(BaseModel):
     rent_expected: Decimal
     rent_received: Decimal
     rent_overdue_total: Decimal
-    items: list[VenueMetricsRow]  # maior receita primeiro
+    items: list[VenueMetricsRow]  # maior receita primeiro, paginado
+    total: int = 0  # espaços (para a paginação)
+    page: int = 1
+    size: int = 20

@@ -144,7 +144,7 @@ def _pro_export(db: Session, user: User) -> dict:
     from app.services import pros
 
     profile = pros.my_profile(db, user)
-    hires = pros.list_for_pro(db, user)
+    hires = pros.all_for_pro(db, user)  # exportação: o histórico inteiro, sem paginar
     return {
         "pro_profile": pros.profile_out(db, profile) if profile else None,
         "pro_hires": [

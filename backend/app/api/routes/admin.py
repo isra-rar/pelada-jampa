@@ -117,12 +117,13 @@ def list_venues(admin: PlatformAdmin, db: DB, paging: Paging, search: str | None
 
 @router.get("/venues/metrics", response_model=VenuesMetricsOut)
 def venues_metrics(
-    admin: PlatformAdmin, db: DB,
+    admin: PlatformAdmin, db: DB, paging: Paging,
     since: date | None = Query(default=None, description="Padrão: início do mês"),
     until: date | None = Query(default=None, description="Padrão: fim do mês"),
 ):
-    """Métricas de cada espaço no período (peladas, ocupação, aluguel, jogadores) e os totais."""
-    return venue_finance.venues_metrics(db, since, until)
+    """Métricas de cada espaço no período (peladas, ocupação, aluguel, jogadores), da maior receita para a menor,
+    paginadas; os totais valem para todos os espaços."""
+    return venue_finance.venues_metrics(db, since, until, paging.page, paging.size)
 
 
 @router.get("/venues/{venue_id}/dashboard", response_model=VenueDashboardOut)

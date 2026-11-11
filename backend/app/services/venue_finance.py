@@ -143,40 +143,65 @@ def _out(row) -> dict:
 
 
 def list_rent(db: Session, venue: Venue, *, month: str | None, status: RentStatus | None,
-              group_id: int | None) -> dict:
+              group_id: int | None, page: int = 1, size: int = 50) -> dict:
+    """Aluguel do mês: totais e fechamento por grupo sobre o mês inteiro; as peladas (`items`) vêm paginadas e
+    podem ser filtradas por grupo e situação."""
     sync_rent(db, venue_id=venue.id)
     db.commit()
     label, first, last = _month_bounds(month)
     start, end = _local_range(first, last)
-    stmt = _charges_query().where(RentCharge.venue_id == venue.id, Match.starts_at >= start, Match.starts_at < end)
-    if group_id is not None:
-        stmt = stmt.where(RentCharge.group_id == group_id)
-    rows = db.execute(stmt.order_by(Match.starts_at, RentCharge.id)).all()
+    in_month = (RentCharge.venue_id == venue.id, Match.starts_at >= start, Match.starts_at < end)
+    summary = db.execute(
+        select(RentCharge.group_id, FootballGroup.name, RentCharge.status, RentCharge.amount,
+               RentCharge.reported_paid_at)
+        .join(FootballGroup, FootballGroup.id == RentCharge.group_id)
+        .join(Match, Match.id == RentCharge.match_id)
+        .where(*in_month)
+    ).all()
     totals = defaultdict(lambda: Decimal("0"))
     groups: dict[int, dict] = {}
-    for row in rows:
-        c, group_name = row[0], row[3]
-        totals[c.status] += c.amount
-        g = groups.setdefault(c.group_id, {"group_id": c.group_id, "group_name": group_name, "charges": 0,
-                                           "amount": Decimal("0"), "paid": Decimal("0"), "pending": Decimal("0"),
-                                           "reported": 0})
-        if c.status == RentStatus.CANCELLED:
+    for gid, group_name, charge_status, amount, reported_at in summary:
+        totals[charge_status] += amount
+        g = groups.setdefault(gid, {"group_id": gid, "group_name": group_name, "charges": 0,
+                                    "amount": Decimal("0"), "paid": Decimal("0"), "pending": Decimal("0"),
+                                    "reported": 0})
+        if charge_status == RentStatus.CANCELLED:
             continue
         g["charges"] += 1
-        g["amount"] += c.amount
-        if c.status == RentStatus.PAID:
-            g["paid"] += c.amount
-        elif c.status == RentStatus.PENDING:
-            g["pending"] += c.amount
-            g["reported"] += 1 if c.reported_paid_at else 0
-    items = [_out(r) for r in rows if status is None or r[0].status == status]
+        g["amount"] += amount
+        if charge_status == RentStatus.PAID:
+            g["paid"] += amount
+        elif charge_status == RentStatus.PENDING:
+            g["pending"] += amount
+            g["reported"] += 1 if reported_at else 0
+    stmt = _charges_query().where(*in_month)
+    if group_id is not None:
+        stmt = stmt.where(RentCharge.group_id == group_id)
+    if status is not None:
+        stmt = stmt.where(RentCharge.status == status)
+    items_total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.execute(stmt.order_by(Match.starts_at, RentCharge.id).offset((page - 1) * size).limit(size)).all()
     return {
         "month": label,
         "total": totals[RentStatus.PAID] + totals[RentStatus.PENDING],
         "paid": totals[RentStatus.PAID], "pending": totals[RentStatus.PENDING], "exempt": totals[RentStatus.EXEMPT],
-        "items": items,
+        "items": [_out(r) for r in rows],
+        "items_total": items_total, "page": page, "size": size,
         "groups": sorted(groups.values(), key=lambda g: (-g["pending"], g["group_name"])),
     }
+
+
+def settle_group_month(db: Session, venue: Venue, group_id: int, month: str | None, method: str | None,
+                       actor: User) -> list[RentCharge]:
+    """Fechamento do mês de um grupo: quita todos os aluguéis pendentes dele no mês."""
+    _, first, last = _month_bounds(month)
+    start, end = _local_range(first, last)
+    ids = list(db.scalars(
+        select(RentCharge.id).join(Match, Match.id == RentCharge.match_id).where(
+            RentCharge.venue_id == venue.id, RentCharge.group_id == group_id,
+            RentCharge.status == RentStatus.PENDING, Match.starts_at >= start, Match.starts_at < end)
+    ).all())
+    return settle(db, venue, ids, method, actor) if ids else []
 
 
 def get_charge(db: Session, charge_id: int) -> RentCharge:
@@ -570,24 +595,85 @@ def dashboard(db: Session, venue: Venue, since: date | None, until: date | None)
 # ------------------------------------------------------------------ gestão (Super-Admin)
 
 
-def venues_metrics(db: Session, since: date | None, until: date | None) -> dict:
-    """Métricas de cada espaço no período (Super-Admin): peladas, ocupação, aluguel, jogadores e grupos, com os
-    totais da plataforma. Mesmo cálculo do painel do dono."""
-    rows = []
+def venues_metrics(db: Session, since: date | None, until: date | None, page: int = 1, size: int = 20) -> dict:
+    """Métricas de cada espaço no período (Super-Admin), da maior receita para a menor. Os totais da plataforma
+    saem de consultas agregadas; o painel completo (ocupação, grupos, pendências) só é montado para os espaços da
+    página."""
+    sync_rent(db)
+    db.commit()
+    _, first, last = _month_bounds(None)
+    since, until = since or first, until or last
+    if until < since or (until - since).days > 366:
+        raise BusinessRuleError("Período inválido (máximo de um ano)", code="invalid_period")
+    start, end = _local_range(since, until)
     now = utcnow()
-    for venue in db.scalars(select(Venue).order_by(Venue.name)).all():
+    zero = Decimal("0")
+
+    rent = defaultdict(lambda: {"expected": Decimal("0"), "received": Decimal("0")})
+    for venue_id, charge_status, amount in db.execute(
+        select(RentCharge.venue_id, RentCharge.status, func.coalesce(func.sum(RentCharge.amount), 0))
+        .join(Match, Match.id == RentCharge.match_id)
+        .where(Match.starts_at >= start, Match.starts_at < end,
+               RentCharge.status.in_((RentStatus.PAID, RentStatus.PENDING)))
+        .group_by(RentCharge.venue_id, RentCharge.status)
+    ).all():
+        rent[venue_id]["expected"] += Decimal(amount)
+        if charge_status == RentStatus.PAID:
+            rent[venue_id]["received"] += Decimal(amount)
+    overdue = {vid: Decimal(v) for vid, v in db.execute(
+        select(RentCharge.venue_id, func.sum(RentCharge.amount))
+        .where(RentCharge.status == RentStatus.PENDING).group_by(RentCharge.venue_id)
+    ).all()}
+    held = dict(db.execute(
+        select(Court.venue_id, func.count()).select_from(Match).join(Court, Court.id == Match.court_id)
+        .where(Match.status.in_(_HELD), Match.starts_at >= start, Match.starts_at < min(end, now))
+        .group_by(Court.venue_id)
+    ).all())
+    cancelled = dict(db.execute(
+        select(Court.venue_id, func.count()).select_from(Match).join(Court, Court.id == Match.court_id)
+        .where(Match.status == MatchStatus.CANCELLED, Match.starts_at >= start, Match.starts_at < end)
+        .group_by(Court.venue_id)
+    ).all())
+    players = dict(db.execute(
+        select(Court.venue_id, func.count(func.distinct(GroupMember.user_id)))
+        .select_from(MatchPlayer)
+        .join(Match, Match.id == MatchPlayer.match_id)
+        .join(Court, Court.id == Match.court_id)
+        .join(GroupMember, GroupMember.id == MatchPlayer.member_id)
+        .where(Match.status.in_(_HELD), Match.starts_at >= start, Match.starts_at < min(end, now),
+               MatchPlayer.is_referee.is_(False),
+               MatchPlayer.status.in_((AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)))
+        .group_by(Court.venue_id)
+    ).all())
+
+    # ocupação da plataforma: horas reservadas / horas abertas (menos bloqueios) das quadras ativas
+    all_venues = list(db.scalars(select(Venue)).all())
+    active_courts = dict(db.execute(
+        select(Court.venue_id, func.count()).where(Court.is_active.is_(True)).group_by(Court.venue_id)
+    ).all())
+    open_hours = 0.0
+    for venue in all_venues:
+        per_court, day = 0.0, since
+        while day <= until:
+            window = opening_window(venue, day)
+            if window:
+                per_court += (window[1] - window[0]).total_seconds() / 3600
+            day += timedelta(days=1)
+        open_hours += per_court * active_courts.get(venue.id, 0)
+    booked = sum(_overlap_hours(s_at, e_at, start, end) for s_at, e_at in db.execute(
+        select(Match.starts_at, Match.ends_at).join(Court, Court.id == Match.court_id)
+        .where(Court.is_active.is_(True), Match.status != MatchStatus.CANCELLED,
+               Match.starts_at < end, Match.ends_at > start)
+    ).all())
+    blocked = sum(_overlap_hours(s_at, e_at, start, end) for s_at, e_at in db.execute(
+        select(CourtBlock.starts_at, CourtBlock.ends_at).join(Court, Court.id == CourtBlock.court_id)
+        .where(Court.is_active.is_(True), CourtBlock.starts_at < end, CourtBlock.ends_at > start)
+    ).all())
+
+    ranked = sorted(all_venues, key=lambda v: (-rent[v.id]["expected"], -held.get(v.id, 0), v.name.lower()))
+    rows = []
+    for venue in ranked[(page - 1) * size: page * size]:
         d = dashboard(db, venue, since, until)
-        start, end = _local_range(d["since"], d["until"])
-        court_ids = [c.id for c in courts_of(db, venue.id)]
-        players = db.scalar(
-            select(func.count(func.distinct(GroupMember.user_id)))
-            .select_from(MatchPlayer)
-            .join(GroupMember, GroupMember.id == MatchPlayer.member_id)
-            .join(Match, Match.id == MatchPlayer.match_id)
-            .where(Match.court_id.in_(court_ids), Match.status.in_(_HELD), Match.starts_at >= start,
-                   Match.starts_at < min(end, now), MatchPlayer.is_referee.is_(False),
-                   MatchPlayer.status.in_((AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)))
-        ) or 0 if court_ids else 0
         owners = db.scalars(
             select(User.name).join(VenueStaff, VenueStaff.user_id == User.id)
             .where(VenueStaff.venue_id == venue.id, VenueStaff.role == VenueRole.OWNER,
@@ -597,25 +683,19 @@ def venues_metrics(db: Session, since: date | None, until: date | None) -> dict:
             "venue_id": venue.id, "name": venue.name, "is_active": venue.is_active, "owners": list(owners),
             "courts": len(d["courts"]), "occupancy_rate": d["occupancy_rate"], "booked_hours": d["booked_hours"],
             "matches_held": d["matches_held"], "matches_cancelled": d["matches_cancelled"],
-            "matches_upcoming": d["matches_upcoming"], "players": players,
+            "matches_upcoming": d["matches_upcoming"], "players": players.get(venue.id, 0),
             "active_groups": d["active_groups"], "pending_bookings": d["pending_bookings"],
             "rent_expected": d["rent_expected"], "rent_received": d["rent_received"],
             "rent_pending": d["rent_pending"], "rent_overdue_total": d["rent_overdue_total"],
         })
-        since, until = d["since"], d["until"]
-    zero = Decimal("0")
-    if since is None or until is None:  # nenhum espaço cadastrado
-        _, since, until = _month_bounds(None)
-    open_hours = sum(r["booked_hours"] / r["occupancy_rate"] for r in rows if r["occupancy_rate"])
     return {
         "since": since, "until": until,
-        "venues": len(rows), "active_venues": sum(1 for r in rows if r["is_active"]),
-        "matches_held": sum(r["matches_held"] for r in rows),
-        "matches_cancelled": sum(r["matches_cancelled"] for r in rows),
-        "players": sum(r["players"] for r in rows),
-        "occupancy_rate": _rate(sum(r["booked_hours"] for r in rows if r["occupancy_rate"]), open_hours),
-        "rent_expected": sum((r["rent_expected"] for r in rows), zero),
-        "rent_received": sum((r["rent_received"] for r in rows), zero),
-        "rent_overdue_total": sum((r["rent_overdue_total"] for r in rows), zero),
-        "items": sorted(rows, key=lambda r: (-r["rent_expected"], -r["matches_held"], r["name"])),
+        "venues": len(all_venues), "active_venues": sum(1 for v in all_venues if v.is_active),
+        "matches_held": sum(held.values()), "matches_cancelled": sum(cancelled.values()),
+        "players": sum(players.values()),
+        "occupancy_rate": _rate(booked, open_hours - blocked),
+        "rent_expected": sum((r["expected"] for r in rent.values()), zero),
+        "rent_received": sum((r["received"] for r in rent.values()), zero),
+        "rent_overdue_total": sum(overdue.values(), zero),
+        "items": rows, "total": len(all_venues), "page": page, "size": size,
     }

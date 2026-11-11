@@ -340,11 +340,21 @@ def list_for_match(db: Session, match: Match) -> list[MatchHire]:
     ).all())
 
 
-def list_for_pro(db: Session, user: User, status: HireStatus | None = None) -> list[MatchHire]:
+def all_for_pro(db: Session, user: User) -> list[MatchHire]:
+    """Todos os pedidos do profissional (exportação de dados)."""
+    stmt = select(MatchHire).join(Match, Match.id == MatchHire.match_id).where(MatchHire.pro_user_id == user.id)
+    return list(db.scalars(stmt.order_by(Match.starts_at.desc())).unique().all())
+
+
+def list_for_pro(db: Session, user: User, status: HireStatus | None = None, *, page: int = 1,
+                 size: int = 20) -> tuple[list[MatchHire], int]:
     stmt = select(MatchHire).join(Match, Match.id == MatchHire.match_id).where(MatchHire.pro_user_id == user.id)
     if status is not None:
         stmt = stmt.where(MatchHire.status == status)
-    return list(db.scalars(stmt.order_by(Match.starts_at.desc())).unique().all())
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = db.scalars(stmt.order_by(Match.starts_at.desc(), MatchHire.id.desc())
+                       .offset((page - 1) * size).limit(size)).unique().all()
+    return list(items), total
 
 
 def _get_for_pro(db: Session, user: User, hire_id: int) -> MatchHire:

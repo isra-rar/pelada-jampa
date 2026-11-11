@@ -113,7 +113,7 @@ def test_hire_goalkeeper_enters_match_and_cost_is_split(apiclient, clock, db):
     assert hire["outside_availability"] is False and hire["over_max_duration"] is False
     api.post(f"/matches/{mid}/hires", admin, 409, json={"pro_id": pro["id"], "role": "referee"})
 
-    received = api.get("/pros/me/hires", pro_h)
+    received = api.get("/pros/me/hires", pro_h)["items"]
     assert len(received) == 1 and received[0]["group_name"] == "Pelada dos Amigos"
     assert any(n["type"] == "hire" for n in api.get("/notifications", pro_h)["items"])
 
@@ -197,7 +197,7 @@ def test_match_cancel_and_expiry_close_hires(apiclient, clock, db):
     mid = api.post(f"{G}/{gid}/matches", admin, 201, json=match_payload(goalkeepers_per_team=1))["id"]
     h = api.post(f"/matches/{mid}/hires", admin, 201, json={"pro_id": pro["id"], "role": "goalkeeper"})
     api.post(f"/matches/{mid}/cancel", admin, json={"reason": "Chuva"})
-    assert api.get("/pros/me/hires", pro_h)[0]["status"] == "cancelled"
+    assert api.get("/pros/me/hires", pro_h)["items"][0]["status"] == "cancelled"
     titles = [n.title for n in db.scalars(select(Notification).where(Notification.type == "hire")).all()]
     assert any("Pelada cancelada" in t for t in titles)
 
@@ -205,7 +205,7 @@ def test_match_cancel_and_expiry_close_hires(apiclient, clock, db):
     h2 = api.post(f"/matches/{mid2}/hires", admin, 201, json={"pro_id": pro["id"], "role": "goalkeeper"})
     clock.set(T0 + timedelta(days=2, minutes=5))  # a pelada começou sem resposta
     assert pros_service.expire_due(db) == 1
-    assert {x["id"]: x["status"] for x in api.get("/pros/me/hires", pro_h)}[h2["id"]] == "expired"
+    assert {x["id"]: x["status"] for x in api.get("/pros/me/hires", pro_h)["items"]}[h2["id"]] == "expired"
     assert h["id"] != h2["id"]
 
 

@@ -68,10 +68,12 @@ def save_profile(data: ProProfileIn, user: CurrentUser, db: DB):
     return pros.profile_out(db, pros.upsert_profile(db, user, data))
 
 
-@router.get("/pros/me/hires", response_model=list[HireOut])
-def my_hires(user: CurrentUser, db: DB, status_: HireStatus | None = Query(default=None, alias="status")):
-    """Pedidos recebidos (mais recentes primeiro)."""
-    return [pros.hire_out(db, h, viewer="pro") for h in pros.list_for_pro(db, user, status_)]
+@router.get("/pros/me/hires", response_model=Page[HireOut])
+def my_hires(user: CurrentUser, db: DB, paging: Paging,
+             status_: HireStatus | None = Query(default=None, alias="status")):
+    """Pedidos recebidos (pelada mais recente primeiro), paginados."""
+    items, total = pros.list_for_pro(db, user, status_, page=paging.page, size=paging.size)
+    return page_of([pros.hire_out(db, h, viewer="pro") for h in items], total, paging)
 
 
 @router.post("/hires/{hire_id}/accept", response_model=HireOut)

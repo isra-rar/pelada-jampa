@@ -7,7 +7,15 @@ from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from app.domain.enums import MatchStatus, Modality, RentStatus, VenueLinkOrigin, VenueLinkStatus, VenueRole
+from app.domain.enums import (
+    BookingStatus,
+    MatchStatus,
+    Modality,
+    RentStatus,
+    VenueLinkOrigin,
+    VenueLinkStatus,
+    VenueRole,
+)
 from app.schemas.common import ORMModel
 
 _HHMM = re.compile(r"^(([01]\d|2[0-3]):[0-5]\d|24:00)$")
@@ -41,6 +49,86 @@ class VenueCreate(BaseModel):
     opening_hours: OpeningHours | None = None
 
     _hours = field_validator("opening_hours")(validate_opening_hours)
+
+
+class AdminVenueCreate(VenueCreate):
+    """Super-Admin cadastra o espaço já com o dono (DE)."""
+
+    owner_name: str = Field(min_length=2, max_length=120)
+    owner_email: EmailStr
+
+
+class AdminVenueUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    address: str | None = Field(default=None, max_length=300)
+    phone: str | None = Field(default=None, max_length=30)
+    is_active: bool | None = None
+
+
+class OwnerIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: EmailStr
+
+
+class VenueOwnerOut(BaseModel):
+    staff_id: int
+    user_id: int
+    name: str
+    email: str
+    claimed: bool  # já criou a conta (senão, o acesso vale quando criar com este e-mail)
+
+
+class AdminVenueRow(BaseModel):
+    id: int
+    name: str
+    address: str | None
+    phone: str | None
+    is_active: bool
+    created_at: datetime
+    owners: list[VenueOwnerOut]
+    courts: int
+    active_groups: int
+    pending_bookings: int
+
+
+class VenuePeladaCreate(BaseModel):
+    """Pelada de horário fixo semanal criada pelo DE na agenda (já com o administrador)."""
+
+    name: str = Field(min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    modality: Modality | None = None  # padrão: a da quadra
+    court_id: int
+    first_starts_at: datetime  # primeira data; repete toda semana no mesmo dia e hora
+    duration_minutes: int = Field(default=60, ge=30, le=600)
+    slots: int = Field(default=14, ge=2, le=200)
+    num_teams: int | None = Field(default=None, ge=2, le=8)
+    price: Decimal = Field(default=Decimal("0"), ge=0, max_digits=10, decimal_places=2,
+                           description="Valor por jogador")
+    admin_name: str = Field(min_length=2, max_length=120)
+    admin_email: EmailStr
+    rent_hourly_price: Decimal | None = Field(default=None, ge=0, max_digits=10, decimal_places=2)
+
+
+class BookingOut(BaseModel):
+    """Horário pedido por um grupo sem vínculo, aguardando o DE."""
+
+    match_id: int
+    match_name: str
+    group_id: int
+    group_name: str
+    court_id: int | None
+    court_name: str | None
+    starts_at: datetime
+    ends_at: datetime
+    booking_status: BookingStatus | None
+    confirmed: int
+    slots: int
+    created_at: datetime
+    admins: list["GroupAdminContact"]  # só enquanto pendente
+
+
+class BookingRejectIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=300)
 
 
 class VenueUpdate(BaseModel):
@@ -160,6 +248,7 @@ class CalendarItem(BaseModel):
     slots: int | None = None
     series_id: int | None = None
     mine: bool = False  # visão do grupo: pelada do próprio grupo
+    booking_status: BookingStatus | None = None  # pending: aguardando o DE confirmar
 
 
 class CalendarCourtDay(BaseModel):
@@ -302,6 +391,59 @@ class GroupRentOut(BaseModel):
     pending_amount: Decimal
     pending_count: int
     items: list[RentChargeOut]  # todas as pendentes e as últimas quitadas
+
+
+# ------------------------------------------------------------------ financeiro do dono
+
+
+class FinanceMonth(BaseModel):
+    month: str  # AAAA-MM
+    matches: int
+    expected: Decimal  # aluguel devido (sem isentos nem cancelados)
+    received: Decimal
+    pending: Decimal
+    exempt: Decimal
+
+
+class FinanceCourt(BaseModel):
+    court_id: int
+    name: str
+    matches: int
+    hours: float
+    expected: Decimal
+    received: Decimal
+
+
+class FinanceMethod(BaseModel):
+    method: str
+    count: int
+    amount: Decimal
+
+
+class FinanceAging(BaseModel):
+    upto_30: Decimal  # pendente de peladas com até 30 dias
+    from_31_to_60: Decimal
+    over_60: Decimal
+
+
+class FinanceOut(BaseModel):
+    """Financeiro consolidado do espaço (só o dono). Valores e nomes de grupos; nunca dados de atletas."""
+
+    months: int
+    series: list[FinanceMonth]  # do mês mais antigo ao atual
+    expected: Decimal
+    received: Decimal
+    pending: Decimal
+    exempt: Decimal
+    collection_rate: float | None  # recebido / devido
+    average_per_match: Decimal
+    overdue_total: Decimal  # pendente de qualquer período
+    aging: FinanceAging
+    upcoming_matches: int  # peladas marcadas que ainda não geraram aluguel
+    upcoming_expected: Decimal
+    by_court: list[FinanceCourt]
+    by_method: list[FinanceMethod]
+    debtors: list["OverdueGroup"]  # definido mais abaixo
 
 
 # ------------------------------------------------------------------ painel

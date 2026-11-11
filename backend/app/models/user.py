@@ -20,6 +20,7 @@ class User(Base):
     phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
     photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Super-Admin: conta só de gestão (cadastra os espaços e define os DEs de cada um)
     is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     # tokens emitidos antes desta data deixam de valer (troca/redefinição de senha)
     password_changed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

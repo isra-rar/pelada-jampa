@@ -11,6 +11,7 @@ from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, Conflict
 from app.domain.enums import (
     AttendanceStatus,
+    BookingStatus,
     GroupRole,
     HireRole,
     HireStatus,
@@ -108,9 +109,14 @@ def create_match(
     _validate_schedule(starts_at, ends_at, confirmation, cancellation)
     location, address = data.location, data.address
     field_cost = data.field_cost
+    booking_status = None
     if data.court_id is not None:
-        # quadra de espaço vinculado: reserva o horário (falha se ocupado, bloqueado ou fora do funcionamento)
-        court = venues.court_for_group(db, group, data.court_id)
+        # reserva o horário na agenda do espaço (falha se ocupado, bloqueado ou fora do funcionamento). No espaço
+        # vinculado ao grupo já entra confirmado; em outro espaço fica pendente até o dono confirmar
+        if series is not None:
+            court, booking_status = venues.court_for_group(db, group, data.court_id), BookingStatus.CONFIRMED
+        else:
+            court, booking_status = venues.court_for_booking(db, group, data.court_id)
         venues.check_slot(db, court, starts_at, ends_at)
         label, venue_address = venues.court_label(db, court)
         location, address = location or label, address or venue_address
@@ -127,6 +133,7 @@ def create_match(
         location=location,
         address=address,
         court_id=data.court_id,
+        booking_status=booking_status,
         starts_at=starts_at,
         ends_at=ends_at,
         price=data.price,
@@ -154,6 +161,8 @@ def create_match(
     db.flush()
     audit.record(db, action="match.created", entity_type="match", entity_id=match.id, actor_user_id=actor.id,
                  group_id=group.id, after=audit.snapshot(match, _MATCH_AUDIT_FIELDS))
+    if booking_status == BookingStatus.PENDING:
+        venues.notify_booking_request(db, group, match)
     if data.publish:
         publish_match(db, group, match, actor, commit=False)
     if commit:
@@ -206,15 +215,20 @@ def update_match(db: Session, group: FootballGroup, match: Match, data: MatchUpd
         setattr(match, key, value)
     _check_expansion(match)
     if match.split_cost and match.field_cost is None and match.court_id is not None:
-        court = venues.court_for_group(db, group, match.court_id)
+        court, _ = venues.court_for_booking(db, group, match.court_id)
         match.field_cost = venue_finance.rent_amount(db, group.id, court, match.duration_minutes)
     _validate_schedule(match.starts_at, match.ends_at, match.confirmation_deadline, match.cancellation_deadline)
-    if match.court_id is not None and (court_changed or (match.starts_at, match.ends_at) != old_times):
-        court = venues.court_for_group(db, group, match.court_id)
+    if match.court_id is None:
+        match.booking_status = None
+    elif court_changed or (match.starts_at, match.ends_at) != old_times:
+        # novo horário ou quadra: fora do espaço vinculado, volta a depender da confirmação do dono
+        court, match.booking_status = venues.court_for_booking(db, group, match.court_id)
         venues.check_slot(db, court, match.starts_at, match.ends_at, exclude_match_id=match.id)
         if court_changed and "location" not in changes:
             match.location, venue_address = venues.court_label(db, court)
             match.address = changes.get("address") or venue_address
+        if match.booking_status == BookingStatus.PENDING:
+            venues.notify_booking_request(db, group, match)
     db.flush()
     after = audit.snapshot(match, _MATCH_AUDIT_FIELDS)
     if before != after:

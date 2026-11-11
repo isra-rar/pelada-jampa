@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, status
 from sqlalchemy import func, or_, select
 
 from app.api.deps import DB, Paging, PlatformAdmin, page_of
@@ -21,7 +21,8 @@ from app.schemas.common import Page
 from app.schemas.draw import DrawCalibrationOut
 from app.schemas.metrics import PlatformMetricsOut
 from app.schemas.platform import PlatformSettingsOut, PlatformSettingsUpdate
-from app.services import admin_groups, audit, metrics, platform
+from app.schemas.venue import AdminVenueCreate, AdminVenueRow, AdminVenueUpdate, OwnerIn
+from app.services import admin_groups, audit, metrics, platform, venues
 from app.services import draw_calibration as draw_calibration_service
 from app.services.access import get_group, get_member_in_group
 from app.services.users import real_users
@@ -49,14 +50,51 @@ def update_user(user_id: int, data: PlatformUserUpdate, admin: PlatformAdmin, db
         raise BusinessRuleError("Você não pode remover seu próprio acesso administrativo")
     if user.is_deleted:
         raise BusinessRuleError("Conta excluída pelo titular não pode ser reativada", code="user_deleted")
-    before = audit.snapshot(user, ["is_active", "is_platform_admin"])
+    fields = ["is_active", "is_platform_admin"]
+    before = audit.snapshot(user, fields)
     for key, value in data.model_dump(exclude_none=True).items():
         setattr(user, key, value)
     audit.record(db, action="platform.user_updated", entity_type="user", entity_id=user.id,
-                 actor_user_id=admin.id, group_id=None, before=before,
-                 after=audit.snapshot(user, ["is_active", "is_platform_admin"]))
+                 actor_user_id=admin.id, group_id=None, before=before, after=audit.snapshot(user, fields))
     db.commit()
     return user
+
+
+@router.get("/venues", response_model=Page[AdminVenueRow])
+def list_venues(admin: PlatformAdmin, db: DB, paging: Paging, search: str | None = None):
+    """Espaços (mais recentes primeiro) com os donos (DE), quadras, grupos vinculados e horários pendentes. Busca
+    pelo nome do espaço ou do dono."""
+    items, total = venues.admin_list_venues(db, search, paging.page, paging.size)
+    return page_of(items, total, paging)
+
+
+@router.post("/venues", response_model=AdminVenueRow, status_code=status.HTTP_201_CREATED)
+def create_venue(data: AdminVenueCreate, admin: PlatformAdmin, db: DB):
+    """Cadastra o espaço e define o dono (DE) pelo e-mail. Quem ainda não tem conta passa a ter acesso ao criar a
+    conta com o mesmo e-mail."""
+    return venues.admin_venue_out(db, venues.create_venue(db, admin, data))
+
+
+@router.patch("/venues/{venue_id}", response_model=AdminVenueRow)
+def update_venue(venue_id: int, data: AdminVenueUpdate, admin: PlatformAdmin, db: DB):
+    venue = venues.admin_update_venue(db, venues.get_venue(db, venue_id), data, admin)
+    return venues.admin_venue_out(db, venue)
+
+
+@router.post("/venues/{venue_id}/owners", response_model=AdminVenueRow, status_code=status.HTTP_201_CREATED)
+def add_venue_owner(venue_id: int, data: OwnerIn, admin: PlatformAdmin, db: DB):
+    """Define mais um dono (DE) do espaço."""
+    venue = venues.get_venue(db, venue_id)
+    venues.admin_add_owner(db, venue, data.email, data.name, admin)
+    return venues.admin_venue_out(db, venue)
+
+
+@router.delete("/venues/{venue_id}/owners/{staff_id}", response_model=AdminVenueRow)
+def remove_venue_owner(venue_id: int, staff_id: int, admin: PlatformAdmin, db: DB):
+    """Tira um dono (DE) do espaço; o espaço mantém ao menos um."""
+    venue = venues.get_venue(db, venue_id)
+    venues.admin_remove_owner(db, venue, staff_id, admin)
+    return venues.admin_venue_out(db, venue)
 
 
 @router.get("/groups", response_model=Page[AdminGroupRow])

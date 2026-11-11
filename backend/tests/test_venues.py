@@ -13,8 +13,26 @@ from tests.test_api_flows import G, setup_group
 V = "/venues"
 
 
-def _venue(api, owner, **kw):
-    venue = api.post(V, owner, 201, json={"name": "Arena Central", "address": "Rua da Bola, 10", **kw})
+def root(api) -> dict:
+    """Conta Super-Admin (só gestão), criada como o script de produção faz."""
+    from app.core.db import SessionLocal
+    from app.services.users import ensure_super_admin
+
+    with SessionLocal() as s:
+        _, password, _ = ensure_super_admin(s, "root@example.com", "Root")
+    r = api.c.post("/api/v1/auth/login", json={"email": "root@example.com", "password": password})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['access_token']}", "_email": "root@example.com"}
+
+
+def _venue(api, owner, expected=201, **kw):
+    """O Super-Admin cadastra o espaço com `owner` como dono (DE)."""
+    row = api.post("/admin/venues", root(api), expected, json={
+        "name": "Arena Central", "address": "Rua da Bola, 10", "owner_name": owner["_name"],
+        "owner_email": owner["_email"], **kw})
+    if expected != 201:
+        return row, None
+    venue = api.get(f"{V}/{row['id']}", owner)
     court = api.post(f"{V}/{venue['id']}/courts", owner, 201,
                      json={"name": "Quadra 1", "modality": "society", "hourly_price": "120.00"})
     return venue, court
@@ -37,7 +55,7 @@ def _types(api, headers):
 def test_venue_setup_staff_and_access(apiclient):
     api = apiclient
     owner = api.user("Dono")
-    api.post(V, owner, 422, json={"name": "Errado", "opening_hours": {"0": ["23:00", "08:00"]}})
+    _venue(api, owner, 422, name="Errado", opening_hours={"0": ["23:00", "08:00"]})
     venue, court = _venue(api, owner, opening_hours={"0": ["08:00", "22:00"], "5": ["09:00", "24:00"]})
     assert venue["my_role"] == "owner" and len(venue["link_code"]) == 8
     assert venue["opening_hours"] == {"0": ["08:00", "22:00"], "5": ["09:00", "24:00"]}
@@ -230,7 +248,9 @@ def test_venue_created_group_admin_and_unlink(apiclient):
                                                   "rent_hourly_price": None}
     assert api.get(f"{V}/{vid}/calendar", owner, params={"start": "2026-11-04", "days": 1})[
         "schedule"][0]["courts"][0]["items"] == []
-    api.post(f"{G}/{gid}/matches", novo, 422, json=match_payload(location=None, court_id=court["id"]))
+    # sem vínculo, a pelada na quadra fica com o horário pendente até o dono confirmar
+    pending = api.post(f"{G}/{gid}/matches", novo, 201, json=match_payload(location=None, court_id=court["id"]))
+    assert pending["booking_status"] == "pending"
 
 
 def test_independent_group_can_leave_and_owner_cannot_delete_account(apiclient):
@@ -263,3 +283,93 @@ def test_hours_change_keeps_bookings_and_free_slots_start_now(apiclient, clock):
     clock.set(T0 + timedelta(days=2, hours=3))  # quarta, 12h (Brasília)
     day = api.get(f"{V}/{venue['id']}/calendar", owner, params={"start": "2026-11-04", "days": 1})["schedule"][0]
     assert day["courts"][0]["free"][0]["starts_at"].startswith("2026-11-04T15:00")
+
+
+def test_owner_finance_overview_export_and_isolation(apiclient, clock):
+    api = apiclient
+    owner = api.user("Dono")
+    venue, court = _venue(api, owner)
+    vid = venue["id"]
+    admin, group, players, link = _linked_group(api, owner, venue)
+    gid = group["id"]
+    match = api.post(f"{G}/{gid}/matches", admin, 201, json=match_payload(location=None, court_id=court["id"]))
+
+    # a pelada marcada ainda não gerou aluguel: aparece só na previsão (R$ 120/h × 1h30)
+    fin = api.get(f"{V}/{vid}/finance", owner)
+    assert fin["upcoming_matches"] == 1 and fin["upcoming_expected"] == "180.00" and fin["expected"] == "0"
+
+    clock.advance(days=2, hours=1)
+    fin = api.get(f"{V}/{vid}/finance", owner, params={"months": 3})
+    assert [m["month"] for m in fin["series"]] == ["2026-09", "2026-10", "2026-11"]
+    assert fin["series"][-1]["pending"] == "180.00" and fin["overdue_total"] == "180.00"
+    assert fin["aging"]["upto_30"] == "180.00" and fin["collection_rate"] == 0.0
+    assert fin["by_court"][0]["expected"] == "180.00" and fin["debtors"][0]["group_name"] == group["name"]
+
+    charge = api.get(f"{V}/{vid}/rent", owner, params={"month": "2026-11"})["items"][0]
+    api.post(f"{V}/{vid}/rent/settle", owner, json={"charge_ids": [charge["id"]], "method": "pix"})
+    fin = api.get(f"{V}/{vid}/finance", owner)
+    assert fin["received"] == "180.00" and fin["pending"] == "0" and fin["collection_rate"] == 1.0
+    assert fin["by_method"] == [{"method": "pix", "count": 1, "amount": "180.00"}] and fin["debtors"] == []
+    assert fin["average_per_match"] == "180.00"
+
+    csv = api.c.get(f"/api/v1{V}/{vid}/finance/export", params={"month": "2026-11"},
+                    headers={"Authorization": owner["Authorization"]})
+    assert csv.status_code == 200 and csv.headers["content-type"].startswith("text/csv")
+    assert "Pelada dos Amigos;Quadra 1" in csv.text and "180,00;Pago" in csv.text
+    assert admin["_email"] not in csv.text  # nada de contato de administradores ou atletas
+    assert db_audit(api, owner)  # exportação auditada
+
+    # só o dono vê o financeiro: gerente e estranhos não
+    manager = api.user("Gerente")
+    api.post(f"{V}/{vid}/staff", owner, 201, json={"email": manager["_email"], "name": "Gerente"})
+    api.get(f"{V}/{vid}/finance", manager, 403)
+    api.c.get(f"/api/v1{V}/{vid}/finance/export", headers={"Authorization": manager["Authorization"]})
+    assert api.c.get(f"/api/v1{V}/{vid}/finance/export",
+                     headers={"Authorization": manager["Authorization"]}).status_code == 403
+    api.get(f"{V}/{vid}/finance", api.user("Estranho"), 404)
+    assert match["id"]
+
+
+def db_audit(api, owner) -> bool:
+    from app.core.db import SessionLocal
+
+    with SessionLocal() as s:
+        return s.scalar(select(AuditLog.id).where(AuditLog.action == "venue.finance_exported")) is not None
+
+
+def test_owner_never_sees_other_venues_nor_groups_that_left(apiclient, clock):
+    api = apiclient
+    owner = api.user("Dono")
+    venue, court = _venue(api, owner)
+    vid = venue["id"]
+    admin, group, _, link = _linked_group(api, owner, venue)
+    api.post(f"{G}/{group['id']}/matches", admin, 201, json=match_payload(location=None, court_id=court["id"]))
+
+    # outro espaço, com a sua própria pelada: o primeiro dono não enxerga nada dele
+    rival = api.user("Rival")
+    venue2, court2 = _venue(api, rival, name="Arena Rival")
+    admin2 = api.user("AdminRival")
+    link2 = api.post(f"{V}/{venue2['id']}/groups", rival, 201, json={
+        "name": "Racha do Rival", "admin_email": admin2["_email"], "admin_name": "AdminRival"})
+    api.post(f"{G}/{link2['group_id']}/matches", admin2, 201,
+             json=match_payload(location=None, court_id=court2["id"]))
+    clock.advance(days=2, hours=1)
+
+    seen = api.get(f"{V}/{vid}/groups", owner)
+    assert [g["group_id"] for g in seen] == [group["id"]]
+    assert [a["email"] for a in seen[0]["admins"]] == [admin["_email"]]
+    fin = api.get(f"{V}/{vid}/finance", owner)
+    assert [d["group_id"] for d in fin["debtors"]] == [group["id"]] and fin["expected"] == "180.00"
+    api.get(f"{V}/{venue2['id']}/finance", owner, 404)
+    api.get(f"{V}/{venue2['id']}/groups", owner, 404)
+    api.patch(f"{V}/{vid}/groups/{link2['id']}", owner, 404, json={"rent_hourly_price": "1.00"})
+    api.post(f"{V}/{vid}/groups/{link2['id']}/admin", owner, 404,
+             json={"email": "x@example.com", "name": "Xis"})
+    other_charge = api.get(f"{V}/{venue2['id']}/rent", rival, params={"month": "2026-11"})["items"][0]
+    api.patch(f"{V}/{vid}/rent/{other_charge['id']}", owner, 404, json={"status": "paid"})
+    api.post(f"{V}/{vid}/rent/settle", owner, 404, json={"charge_ids": [other_charge["id"]]})
+
+    # grupo que saiu do espaço: o dono mantém o histórico de valores, mas perde o contato dos administradores
+    api.call("DELETE", f"{G}/{group['id']}/venue", admin)
+    ended = api.get(f"{V}/{vid}/groups", owner, params={"status": "ended"})
+    assert ended[0]["group_id"] == group["id"] and ended[0]["admins"] == []

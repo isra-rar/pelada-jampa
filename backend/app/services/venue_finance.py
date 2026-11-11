@@ -14,7 +14,14 @@ from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, NotFound
-from app.domain.enums import AttendanceStatus, MatchStatus, NotificationType, RentStatus, VenueLinkStatus
+from app.domain.enums import (
+    AttendanceStatus,
+    BookingStatus,
+    MatchStatus,
+    NotificationType,
+    RentStatus,
+    VenueLinkStatus,
+)
 from app.models import Court, CourtBlock, FootballGroup, Match, MatchPlayer, RentCharge, User, Venue, VenueGroup
 from app.schemas.venue import RentChargeUpdate
 from app.services import audit, notifications
@@ -69,7 +76,8 @@ def sync_rent(db: Session, *, venue_id: int | None = None, group_id: int | None 
         select(Match, Court)
         .join(Court, Court.id == Match.court_id)
         .outerjoin(RentCharge, RentCharge.match_id == Match.id)
-        .where(RentCharge.id.is_(None), Match.status.in_(_HELD), Match.starts_at <= utcnow())
+        .where(RentCharge.id.is_(None), Match.status.in_(_HELD), Match.starts_at <= utcnow(),
+               Match.booking_status == BookingStatus.CONFIRMED)  # horário pendente não gera aluguel
     )
     if venue_id is not None:
         stmt = stmt.where(Court.venue_id == venue_id)
@@ -266,6 +274,139 @@ def report_paid(db: Session, group: FootballGroup, charge: RentCharge, actor: Us
                              f"{_brl(charge.amount)}. Confira e confirme na aba Aluguel.")
     db.commit()
     return charge
+
+
+# ------------------------------------------------------------------ financeiro (dono)
+
+
+def _shift_month(first: date, delta: int) -> date:
+    index = first.year * 12 + (first.month - 1) + delta
+    return date(index // 12, index % 12 + 1, 1)
+
+
+def finance_overview(db: Session, venue: Venue, months: int) -> dict:
+    """Visão consolidada do dono: receita de aluguel por mês e por quadra, recebido × pendente, idade da
+    inadimplência e previsão das próximas peladas. Só valores e nomes de grupos; nada de atletas."""
+    sync_rent(db, venue_id=venue.id)
+    db.commit()
+    today = utcnow().astimezone(BR_TZ).date()
+    current = today.replace(day=1)
+    first = _shift_month(current, -(months - 1))
+    start, end = _local_range(first, _shift_month(current, 1) - timedelta(days=1))
+
+    rows = db.execute(
+        select(RentCharge, Court.name, Match.starts_at, Match.ends_at)
+        .join(Court, Court.id == RentCharge.court_id)
+        .join(Match, Match.id == RentCharge.match_id)
+        .where(RentCharge.venue_id == venue.id, Match.starts_at >= start, Match.starts_at < end,
+               RentCharge.status != RentStatus.CANCELLED)
+    ).all()
+
+    zero = Decimal("0")
+    series = {
+        _shift_month(first, i).strftime("%Y-%m"): {"month": _shift_month(first, i).strftime("%Y-%m"), "matches": 0,
+                                                    "expected": zero, "received": zero, "pending": zero,
+                                                    "exempt": zero}
+        for i in range(months)
+    }
+    courts: dict[int, dict] = {}
+    methods: dict[str, dict] = {}
+    billed = 0
+    for charge, court_name, starts_at, ends_at in rows:
+        bucket = series[starts_at.astimezone(BR_TZ).strftime("%Y-%m")]
+        bucket["matches"] += 1
+        court = courts.setdefault(charge.court_id, {"court_id": charge.court_id, "name": court_name, "matches": 0,
+                                                    "hours": 0.0, "expected": zero, "received": zero})
+        court["matches"] += 1
+        court["hours"] += (ends_at - starts_at).total_seconds() / 3600
+        if charge.status == RentStatus.EXEMPT:
+            bucket["exempt"] += charge.amount
+            continue
+        billed += 1
+        bucket["expected"] += charge.amount
+        court["expected"] += charge.amount
+        if charge.status == RentStatus.PAID:
+            bucket["received"] += charge.amount
+            court["received"] += charge.amount
+            label = charge.method or "não informado"
+            m = methods.setdefault(label, {"method": label, "count": 0, "amount": zero})
+            m["count"] += 1
+            m["amount"] += charge.amount
+        elif charge.status == RentStatus.PENDING:
+            bucket["pending"] += charge.amount
+
+    pending_rows = db.execute(
+        select(RentCharge.group_id, FootballGroup.name, RentCharge.amount, RentCharge.reported_paid_at,
+               Match.starts_at)
+        .join(FootballGroup, FootballGroup.id == RentCharge.group_id)
+        .join(Match, Match.id == RentCharge.match_id)
+        .where(RentCharge.venue_id == venue.id, RentCharge.status == RentStatus.PENDING)
+    ).all()
+    aging = {"upto_30": zero, "from_31_to_60": zero, "over_60": zero}
+    debtors: dict[int, dict] = {}
+    for group_id, group_name, amount, reported_at, starts_at in pending_rows:
+        age = (today - starts_at.astimezone(BR_TZ).date()).days
+        aging["upto_30" if age <= 30 else "from_31_to_60" if age <= 60 else "over_60"] += amount
+        d = debtors.setdefault(group_id, {"group_id": group_id, "group_name": group_name, "pending_amount": zero,
+                                          "charges": 0, "oldest_match_at": starts_at, "reported": 0})
+        d["pending_amount"] += amount
+        d["charges"] += 1
+        d["oldest_match_at"] = min(d["oldest_match_at"], starts_at)
+        d["reported"] += 1 if reported_at else 0
+
+    court_ids = [c.id for c in courts_of(db, venue.id)]
+    upcoming = db.execute(
+        select(Match, Court).join(Court, Court.id == Match.court_id)
+        .outerjoin(RentCharge, RentCharge.match_id == Match.id)
+        .where(Court.venue_id == venue.id, RentCharge.id.is_(None), Match.status == MatchStatus.PUBLISHED,
+               Match.starts_at > utcnow(), Match.booking_status == BookingStatus.CONFIRMED)
+    ).all() if court_ids else []
+    upcoming_amount = sum((rent_amount(db, m.group_id, c, m.duration_minutes) for m, c in upcoming), zero)
+
+    monthly = list(series.values())
+    expected = sum((m["expected"] for m in monthly), zero)
+    received = sum((m["received"] for m in monthly), zero)
+    return {
+        "months": months,
+        "series": monthly,
+        "expected": expected, "received": received,
+        "pending": sum((m["pending"] for m in monthly), zero),
+        "exempt": sum((m["exempt"] for m in monthly), zero),
+        "collection_rate": _rate(float(received), float(expected)),
+        "average_per_match": (expected / billed).quantize(_CENT) if billed else zero,
+        "overdue_total": sum(aging.values(), zero), "aging": aging,
+        "upcoming_matches": len(upcoming), "upcoming_expected": upcoming_amount,
+        "by_court": sorted(({**c, "hours": round(c["hours"], 1)} for c in courts.values()),
+                           key=lambda c: -c["expected"]),
+        "by_method": sorted(methods.values(), key=lambda m: -m["amount"]),
+        "debtors": sorted(debtors.values(), key=lambda d: -d["pending_amount"]),
+    }
+
+
+def export_rent_csv(db: Session, venue: Venue, month: str | None, actor: User) -> tuple[str, str, int]:
+    """Aluguel do mês em CSV (mesmo formato do financeiro dos grupos). A exportação é auditada."""
+    from app.services import finance_export  # evita import circular
+
+    sync_rent(db, venue_id=venue.id)
+    label, first, last = _month_bounds(month)
+    start, end = _local_range(first, last)
+    rows = db.execute(
+        _charges_query().where(RentCharge.venue_id == venue.id, Match.starts_at >= start, Match.starts_at < end)
+        .order_by(Match.starts_at, RentCharge.id)
+    ).all()
+    status_labels = {RentStatus.PENDING: "Pendente", RentStatus.PAID: "Pago", RentStatus.EXEMPT: "Isento",
+                     RentStatus.CANCELLED: "Cancelado"}
+    content = finance_export._csv(
+        ["Data da pelada", "Grupo", "Quadra", "Pelada", "Valor", "Situação", "Grupo informou pagamento em",
+         "Pago em", "Forma de pagamento", "Observações"],
+        [[starts_at.astimezone(BR_TZ).date(), group_name, court_name, match_name, c.amount,
+          status_labels.get(c.status, c.status), c.reported_paid_at, c.paid_at, c.method, c.notes]
+         for c, _venue, court_name, group_name, match_name, starts_at in rows],
+    )
+    audit.record(db, action="venue.finance_exported", entity_type="venue", entity_id=venue.id,
+                 actor_user_id=actor.id, group_id=None, after={"month": label, "rows": len(rows)})
+    db.commit()
+    return content, f"aluguel-{finance_export._slug(venue.name)}-{label}.csv", len(rows)
 
 
 # ------------------------------------------------------------------ painel

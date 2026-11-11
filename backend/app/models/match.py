@@ -5,7 +5,14 @@ from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, Numeric, Strin
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base, UTCDateTime, utcnow
-from app.domain.enums import AttendanceStatus, EvaluationStatus, MatchStatus, Modality, Recurrence
+from app.domain.enums import (
+    AttendanceStatus,
+    BookingStatus,
+    EvaluationStatus,
+    MatchStatus,
+    Modality,
+    Recurrence,
+)
 from app.models._types import str_enum
 
 
@@ -72,6 +79,11 @@ class Match(Base):
     address: Mapped[str | None] = mapped_column(String(300), nullable=True)
     court_id: Mapped[int | None] = mapped_column(
         ForeignKey("courts.id", name="fk_matches_court_id"), nullable=True, index=True
+    )
+    # horário na agenda do espaço: grupo sem vínculo marca como pendente e o DE confirma ou recusa.
+    # Nulo = pelada sem quadra de espaço
+    booking_status: Mapped[BookingStatus | None] = mapped_column(
+        str_enum(BookingStatus, length=12), nullable=True
     )
     starts_at: Mapped[datetime] = mapped_column(UTCDateTime)
     ends_at: Mapped[datetime] = mapped_column(UTCDateTime)

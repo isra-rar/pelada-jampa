@@ -70,6 +70,29 @@ def get_or_create_placeholder(db: Session, email: str, name: str) -> User:
     return user
 
 
+def ensure_super_admin(db: Session, email: str, name: str) -> tuple[User, str, bool]:
+    """Cria (ou recupera) uma conta Super-Admin com uma senha aleatória nova.
+
+    Retorna (conta, senha, criada). Se a conta já existir, a senha é trocada e as sessões abertas caem.
+    A senha só é devolvida aqui: não é guardada em texto em lugar nenhum."""
+    password = secrets.token_urlsafe(15)  # 20 caracteres
+    user = get_by_email(db, email)
+    created = user is None
+    if created:
+        user = User(email=normalize_email(email), name=name)
+        db.add(user)
+    elif user.is_deleted:
+        raise BusinessRuleError("Conta excluída pelo titular não pode ser reativada", code="user_deleted")
+    else:
+        user.password_changed_at = utcnow()
+    user.password_hash = hash_password(password)
+    user.is_active = True
+    user.is_platform_admin = True
+    db.commit()
+    db.refresh(user)
+    return user, password, created
+
+
 def update_me(db: Session, user: User, data: UserUpdate) -> User:
     if data.new_password:
         # conta só-Google ainda não tem senha: pode criar uma sem informar a atual

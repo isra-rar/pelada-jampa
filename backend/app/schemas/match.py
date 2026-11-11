@@ -4,7 +4,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.domain.enums import AttendanceStatus, EvaluationStatus, MatchStatus, Modality, Recurrence
+from app.domain.enums import (
+    AttendanceStatus,
+    BookingStatus,
+    EvaluationStatus,
+    MatchStatus,
+    Modality,
+    Recurrence,
+)
 from app.schemas.common import ORMModel
 
 EvaluationWindow = Literal[6, 24]
@@ -128,6 +135,8 @@ class MatchOut(ORMModel):
     location: str
     address: str | None
     court_id: int | None = None
+    # horário na agenda do espaço: pending = aguardando o dono confirmar; rejected = recusado (sem quadra)
+    booking_status: BookingStatus | None = None
     starts_at: datetime
     ends_at: datetime
     duration_minutes: int

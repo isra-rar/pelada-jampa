@@ -9,10 +9,13 @@ from app.domain.enums import RentStatus, VenueLinkStatus
 from app.schemas.venue import (
     BlockIn,
     BlockOut,
+    BookingOut,
+    BookingRejectIn,
     CalendarOut,
     CourtIn,
     CourtOut,
     CourtUpdate,
+    FinanceOut,
     GroupRentOut,
     GroupVenueOut,
     LinkRequestIn,
@@ -23,13 +26,14 @@ from app.schemas.venue import (
     StaffIn,
     StaffOut,
     StaffUpdate,
-    VenueCreate,
     VenueDashboardOut,
     VenueGroupAdminIn,
     VenueGroupCreate,
     VenueGroupOut,
     VenueGroupUpdate,
     VenueOut,
+    VenuePeladaCreate,
+    VenuePublicOut,
     VenueUpdate,
 )
 from app.services import venue_finance, venues
@@ -49,16 +53,16 @@ def _start(start: date | None) -> date:
 # ------------------------------------------------------------------ espaço (equipe)
 
 
-@router.post("/venues", response_model=VenueOut, status_code=status.HTTP_201_CREATED)
-def create_venue(data: VenueCreate, user: CurrentUser, db: DB):
-    """Cadastra um espaço; quem cadastra vira o dono."""
-    venue, staff = venues.create_venue(db, user, data)
-    return venues.venue_out(db, venue, staff)
-
-
 @router.get("/venues", response_model=list[VenueOut])
 def my_venues(user: CurrentUser, db: DB):
+    """Espaços de que a pessoa é dona (DE) ou funcionária. Espaços são cadastrados pelo Super-Admin."""
     return [venues.venue_out(db, v, s) for v, s in venues.list_my_venues(db, user)]
+
+
+@router.get("/venues/directory", response_model=list[VenuePublicOut])
+def venue_directory(user: CurrentUser, db: DB, search: str | None = None):
+    """Espaços ativos para o administrador de um grupo marcar a pelada numa quadra."""
+    return venues.directory(db, search)
 
 
 @router.get("/venues/{venue_id}", response_model=VenueOut)
@@ -188,6 +192,38 @@ def set_group_admin(venue_id: int, link_id: int, data: VenueGroupAdminIn, user: 
     return venues.link_out(db, venues.set_group_admin(db, venue, link, data, user))
 
 
+# ------------------------------------------------------------------ horários pedidos e peladas do DE
+
+
+@router.get("/venues/{venue_id}/bookings", response_model=list[BookingOut])
+def venue_bookings(venue_id: int, user: CurrentUser, db: DB):
+    """Horários pendentes: peladas marcadas por grupos sem vínculo, aguardando confirmação de data e horário."""
+    venue, _ = venues.require_staff(db, venue_id, user)
+    return [venues.booking_out(db, m) for m in venues.list_bookings(db, venue)]
+
+
+@router.post("/venues/{venue_id}/bookings/{match_id}/confirm", response_model=BookingOut)
+def confirm_booking(venue_id: int, match_id: int, user: CurrentUser, db: DB):
+    """Confirma o horário; o grupo passa a ser vinculado ao espaço (se não tiver outro)."""
+    venue, _ = venues.require_staff(db, venue_id, user)
+    return venues.booking_out(db, venues.decide_booking(db, venue, match_id, True, user))
+
+
+@router.post("/venues/{venue_id}/bookings/{match_id}/reject", response_model=BookingOut)
+def reject_booking(venue_id: int, match_id: int, data: BookingRejectIn, user: CurrentUser, db: DB):
+    """Recusa o horário: a pelada continua para os jogadores, mas sem a quadra."""
+    venue, _ = venues.require_staff(db, venue_id, user)
+    return venues.booking_out(db, venues.decide_booking(db, venue, match_id, False, user, data.reason))
+
+
+@router.post("/venues/{venue_id}/peladas", response_model=VenueGroupOut, status_code=status.HTTP_201_CREATED)
+def create_weekly_pelada(venue_id: int, data: VenuePeladaCreate, user: CurrentUser, db: DB):
+    """Cria uma pelada de horário fixo semanal numa quadra, com o administrador. As próximas semanas já entram
+    confirmadas na agenda."""
+    venue, _ = venues.require_staff(db, venue_id, user)
+    return venues.link_out(db, venues.create_weekly_pelada(db, venue, data, user))
+
+
 # ------------------------------------------------------------------ aluguel e painel
 
 
@@ -213,6 +249,31 @@ def settle_rent(venue_id: int, data: RentSettleIn, user: CurrentUser, db: DB):
     venue, _ = venues.require_staff(db, venue_id, user)
     charges = venue_finance.settle(db, venue, data.charge_ids, data.method, user)
     return [venue_finance.charge_out(db, c) for c in charges]
+
+
+@router.get("/venues/{venue_id}/finance", response_model=FinanceOut)
+def venue_finance_overview(venue_id: int, user: CurrentUser, db: DB,
+                           months: int = Query(default=6, ge=1, le=24, description="Meses até o atual")):
+    """Financeiro consolidado do espaço (receita de aluguel por mês e quadra, inadimplência, previsão). Só o dono;
+    traz valores e nomes de grupos, nunca dados de atletas ou de administradores de outras peladas."""
+    venue, _ = venues.require_staff(db, venue_id, user, owner=True)
+    return venue_finance.finance_overview(db, venue, months)
+
+
+@router.get(
+    "/venues/{venue_id}/finance/export",
+    response_class=Response,
+    responses={200: {"content": {"text/csv": {}}, "description": "Planilha CSV (separador ;)"}},
+)
+def venue_finance_export(venue_id: int, user: CurrentUser, db: DB,
+                         month: str | None = Query(default=None, description="AAAA-MM; padrão: mês atual")):
+    """Aluguel do mês em CSV para planilha. Só o dono."""
+    venue, _ = venues.require_staff(db, venue_id, user, owner=True)
+    content, filename, _rows = venue_finance.export_rent_csv(db, venue, month, user)
+    return Response(
+        content=content.encode("utf-8"), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+    )
 
 
 @router.get("/venues/{venue_id}/dashboard", response_model=VenueDashboardOut)
@@ -262,6 +323,18 @@ def group_venue_calendar(group_id: int, user: CurrentUser, db: DB, start: date |
     if link is None:
         raise NotFound("O grupo não tem espaço vinculado", code="no_venue")
     return venues.calendar(db, venues.get_venue(db, link.venue_id), _start(start), days, viewer_group_id=group_id)
+
+
+@router.get("/groups/{group_id}/venues/{venue_id}/calendar", response_model=CalendarOut)
+def group_any_venue_calendar(group_id: int, venue_id: int, user: CurrentUser, db: DB,
+                             start: date | None = _Start, days: int = _Days):
+    """Horários livres de qualquer espaço ativo, para o administrador pedir um horário (peladas dos outros grupos
+    aparecem só como "Ocupado")."""
+    require_admin(db, group_id, user)
+    venue = venues.get_venue(db, venue_id)
+    if not venue.is_active:
+        raise NotFound("Espaço não encontrado")
+    return venues.calendar(db, venue, _start(start), days, viewer_group_id=group_id)
 
 
 @router.get("/groups/{group_id}/rent", response_model=GroupRentOut)

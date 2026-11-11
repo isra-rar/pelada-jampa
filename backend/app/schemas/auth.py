@@ -29,7 +29,7 @@ class UserOut(ORMModel):
     name: str
     phone: str | None
     photo_url: str | None
-    is_platform_admin: bool
+    is_platform_admin: bool  # Super-Admin (conta só de gestão)
     is_active: bool
     has_password: bool = True
     google_linked: bool = False
@@ -52,7 +52,7 @@ class AccountDeleteIn(BaseModel):
 
 class PlatformUserUpdate(BaseModel):
     is_active: bool | None = None
-    is_platform_admin: bool | None = None
+    is_platform_admin: bool | None = None  # Super-Admin
 
 
 class PasswordResetRequest(BaseModel):

@@ -17,10 +17,12 @@ from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, Conflict, Forbidden, NotFound
 from app.domain.enums import (
     AttendanceStatus,
+    BookingStatus,
     GroupRole,
     MatchStatus,
     MemberStatus,
     NotificationType,
+    Recurrence,
     RentStatus,
     VenueLinkOrigin,
     VenueLinkStatus,
@@ -42,15 +44,18 @@ from app.models import (
 )
 from app.models.venue import default_opening_hours
 from app.schemas.group import GroupCreate
+from app.schemas.match import SeriesCreate
 from app.schemas.venue import (
+    AdminVenueCreate,
+    AdminVenueUpdate,
     BlockIn,
     CourtIn,
     CourtUpdate,
     StaffIn,
     StaffUpdate,
-    VenueCreate,
     VenueGroupAdminIn,
     VenueGroupCreate,
+    VenuePeladaCreate,
     VenueUpdate,
 )
 from app.services import audit, notifications, users
@@ -113,19 +118,23 @@ def _new_code(db: Session) -> str:
             return code
 
 
-def create_venue(db: Session, user: User, data: VenueCreate) -> tuple[Venue, VenueStaff]:
+def create_venue(db: Session, actor: User, data: AdminVenueCreate) -> Venue:
+    """Super-Admin cadastra o espaço e define o dono (DE). Quem ainda não tem conta passa a ter acesso ao criar a
+    conta com o mesmo e-mail."""
     venue = Venue(
         name=data.name, description=data.description, address=data.address, phone=data.phone,
         opening_hours=data.opening_hours if data.opening_hours is not None else default_opening_hours(),
-        link_code=_new_code(db), created_by_id=user.id,
+        link_code=_new_code(db), created_by_id=actor.id,
     )
     db.add(venue)
     db.flush()
-    staff = VenueStaff(venue_id=venue.id, user_id=user.id, role=VenueRole.OWNER)
-    db.add(staff)
-    _record(db, "venue.created", "venue", venue.id, user, after={"name": venue.name})
+    owner = users.get_or_create_placeholder(db, data.owner_email, data.owner_name)
+    db.add(VenueStaff(venue_id=venue.id, user_id=owner.id, role=VenueRole.OWNER))
+    _record(db, "venue.created", "venue", venue.id, actor, after={"name": venue.name, "owner_user_id": owner.id})
+    notifications.notify(db, [owner.id], NotificationType.VENUE, f"Você é o dono de {venue.name}",
+                         "Monte a agenda, crie as peladas e defina quem administra cada uma em Meu espaço.")
     db.commit()
-    return venue, staff
+    return venue
 
 
 def list_my_venues(db: Session, user: User) -> list[tuple[Venue, VenueStaff]]:
@@ -158,6 +167,104 @@ def venue_public_out(db: Session, venue: Venue) -> dict:
         "id": venue.id, "name": venue.name, "address": venue.address, "phone": venue.phone,
         "opening_hours": venue.opening_hours, "courts": courts_of(db, venue.id, active_only=True),
     }
+
+
+def directory(db: Session, search: str | None) -> list[dict]:
+    """Espaços ativos com quadra, para o administrador de um grupo marcar a pelada (o horário fica pendente até o
+    dono confirmar, se o grupo não for vinculado ao espaço)."""
+    stmt = select(Venue).where(Venue.is_active.is_(True), Venue.id.in_(
+        select(Court.venue_id).where(Court.is_active.is_(True))))
+    if search:
+        like = f"%{search.lower()}%"
+        stmt = stmt.where(func.lower(Venue.name).like(like) | func.lower(func.coalesce(Venue.address, "")).like(like))
+    return [venue_public_out(db, v) for v in db.scalars(stmt.order_by(Venue.name).limit(50)).all()]
+
+
+# ------------------------------------------------------------------ gestão (Super-Admin)
+
+
+def _owners(db: Session, venue_id: int) -> list[VenueStaff]:
+    return list(db.scalars(select(VenueStaff).where(
+        VenueStaff.venue_id == venue_id, VenueStaff.role == VenueRole.OWNER, VenueStaff.is_active.is_(True),
+    ).order_by(VenueStaff.id)).all())
+
+
+def admin_venue_out(db: Session, venue: Venue) -> dict:
+    court_ids = [c.id for c in courts_of(db, venue.id)]
+    return {
+        "id": venue.id, "name": venue.name, "address": venue.address, "phone": venue.phone,
+        "is_active": venue.is_active, "created_at": venue.created_at,
+        "owners": [{"staff_id": s.id, "user_id": s.user_id, "name": s.user.name, "email": s.user.email,
+                    "claimed": s.user.is_claimed} for s in _owners(db, venue.id)],
+        "courts": sum(1 for c in courts_of(db, venue.id) if c.is_active),
+        "active_groups": db.scalar(select(func.count()).select_from(VenueGroup).where(
+            VenueGroup.venue_id == venue.id, VenueGroup.status == VenueLinkStatus.ACTIVE)) or 0,
+        "pending_bookings": db.scalar(select(func.count()).select_from(Match).where(
+            Match.court_id.in_(court_ids), Match.booking_status == BookingStatus.PENDING,
+            Match.status != MatchStatus.CANCELLED)) or 0 if court_ids else 0,
+    }
+
+
+def admin_list_venues(db: Session, search: str | None, page: int, size: int) -> tuple[list[dict], int]:
+    stmt = select(Venue)
+    if search:
+        like = f"%{search.lower()}%"
+        owner_match = select(VenueStaff.venue_id).join(User, User.id == VenueStaff.user_id).where(
+            VenueStaff.role == VenueRole.OWNER, VenueStaff.is_active.is_(True),
+            func.lower(User.name).like(like) | func.lower(User.email).like(like))
+        stmt = stmt.where(func.lower(Venue.name).like(like) | Venue.id.in_(owner_match))
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = db.scalars(stmt.order_by(Venue.id.desc()).offset((page - 1) * size).limit(size)).all()
+    return [admin_venue_out(db, v) for v in rows], total
+
+
+def admin_update_venue(db: Session, venue: Venue, data: AdminVenueUpdate, actor: User) -> Venue:
+    fields = ["name", "address", "phone", "is_active"]
+    before = audit.snapshot(venue, fields)
+    changes = data.model_dump(exclude_unset=True)
+    if changes.get("is_active") is False and venue.is_active and _future_bookings(
+        db, [c.id for c in courts_of(db, venue.id)]
+    ):
+        raise BusinessRuleError("Há peladas marcadas nas quadras. Combine com o dono antes de desativar.",
+                                code="venue_in_use")
+    for key, value in changes.items():
+        if value is None and key not in ("address", "phone"):
+            continue
+        setattr(venue, key, value)
+    _record(db, "platform.venue_updated", "venue", venue.id, actor, before=before,
+            after=audit.snapshot(venue, fields))
+    db.commit()
+    return venue
+
+
+def admin_add_owner(db: Session, venue: Venue, email: str, name: str, actor: User) -> VenueStaff:
+    """Define mais um dono (DE) do espaço. Quem já é da equipe como funcionário vira dono."""
+    user = users.get_or_create_placeholder(db, email, name)
+    staff = db.scalar(select(VenueStaff).where(VenueStaff.venue_id == venue.id, VenueStaff.user_id == user.id))
+    if staff is not None and staff.is_active and staff.role == VenueRole.OWNER:
+        raise Conflict("Esta pessoa já é dona do espaço", code="already_owner")
+    if staff is None:
+        staff = VenueStaff(venue_id=venue.id, user_id=user.id)
+        db.add(staff)
+    staff.role = VenueRole.OWNER
+    staff.is_active = True
+    db.flush()
+    _record(db, "platform.venue_owner_added", "venue_staff", staff.id, actor, after={"user_id": user.id})
+    notifications.notify(db, [user.id], NotificationType.VENUE, f"Você é o dono de {venue.name}",
+                         "Monte a agenda, crie as peladas e defina quem administra cada uma em Meu espaço.")
+    db.commit()
+    return staff
+
+
+def admin_remove_owner(db: Session, venue: Venue, staff_id: int, actor: User) -> None:
+    staff = get_staff(db, venue, staff_id)
+    if staff.role != VenueRole.OWNER or not staff.is_active:
+        raise NotFound("Dono não encontrado neste espaço")
+    if _active_owners(db, venue.id) <= 1:
+        raise BusinessRuleError("O espaço precisa de ao menos um dono", code="last_owner")
+    staff.is_active = False
+    _record(db, "platform.venue_owner_removed", "venue_staff", staff.id, actor, before={"user_id": staff.user_id})
+    db.commit()
 
 
 def _future_bookings(db: Session, court_ids: list[int]) -> int:
@@ -372,11 +479,32 @@ def active_link(db: Session, group_id: int) -> VenueGroup | None:
 
 
 def court_for_group(db: Session, group: FootballGroup, court_id: int) -> Court:
+    """Quadra do espaço vinculado ao grupo (recorrências só reservam no espaço vinculado)."""
     court = db.get(Court, court_id)
     link = active_link(db, group.id)
     if court is None or link is None or court.venue_id != link.venue_id:
         raise BusinessRuleError("Quadra não pertence ao espaço vinculado ao grupo", code="court_not_linked")
     return court
+
+
+def court_for_booking(db: Session, group: FootballGroup, court_id: int) -> tuple[Court, BookingStatus]:
+    """Quadra de qualquer espaço ativo para uma pelada avulsa. No espaço vinculado ao grupo o horário já entra
+    confirmado; em outro espaço fica pendente até o dono (DE) confirmar data e horário."""
+    court = db.get(Court, court_id)
+    venue = db.get(Venue, court.venue_id) if court is not None else None
+    if court is None or venue is None or not venue.is_active or not court.is_active:
+        raise BusinessRuleError("Quadra indisponível", code="court_not_found")
+    link = active_link(db, group.id)
+    linked = link is not None and link.venue_id == court.venue_id
+    return court, BookingStatus.CONFIRMED if linked else BookingStatus.PENDING
+
+
+def notify_booking_request(db: Session, group: FootballGroup, match: Match) -> None:
+    court = db.get(Court, match.court_id)
+    venue = db.get(Venue, court.venue_id)
+    notifications.notify(db, staff_user_ids(db, venue.id), NotificationType.VENUE,
+                         f"{group.name} pediu horário em {venue.name}",
+                         f"{notifications.when(match.starts_at)} na {court.name}. Confirme ou recuse na Agenda.")
 
 
 def court_label(db: Session, court: Court) -> tuple[str, str | None]:
@@ -483,6 +611,7 @@ def calendar(db: Session, venue: Venue, start: date, days: int, *, viewer_group_
                     "match_status": m.status if visible else None,
                     "confirmed": confirmed.get(m.id, 0) if visible else None, "slots": m.slots if visible else None,
                     "series_id": m.series_id if visible else None, "mine": mine,
+                    "booking_status": m.booking_status if visible else None,
                 })
                 busy.append((m.starts_at, m.ends_at))
             for b in blocks:
@@ -514,12 +643,14 @@ def get_link(db: Session, venue: Venue, link_id: int) -> VenueGroup:
 def link_out(db: Session, link: VenueGroup) -> dict:
     venue = db.get(Venue, link.venue_id)
     group = db.get(FootballGroup, link.group_id)
+    # contato dos administradores só enquanto o pedido está aberto ou o vínculo ativo: grupos recusados ou
+    # que já saíram do espaço deixam de ser visíveis para o dono
     admins = db.execute(
         select(User).join(GroupMember, GroupMember.user_id == User.id).where(
             GroupMember.group_id == group.id, GroupMember.role == GroupRole.ADMIN,
             GroupMember.status == MemberStatus.ACTIVE,
         ).order_by(User.name)
-    ).scalars().all()
+    ).scalars().all() if link.status in _LIVE else []
     active_members = db.scalar(select(func.count()).where(
         GroupMember.group_id == group.id, GroupMember.status == MemberStatus.ACTIVE)) or 0
     court_ids = [c.id for c in courts_of(db, venue.id)]
@@ -550,7 +681,8 @@ def _live_link(db: Session, group_id: int) -> VenueGroup | None:
     return db.scalar(select(VenueGroup).where(VenueGroup.group_id == group_id, VenueGroup.status.in_(_LIVE)))
 
 
-def create_group(db: Session, venue: Venue, data: VenueGroupCreate, actor: User) -> VenueGroup:
+def create_group(db: Session, venue: Venue, data: VenueGroupCreate, actor: User, *,
+                 commit: bool = True) -> VenueGroup:
     """O espaço cria a pelada e define quem a administra (o administrador cuida do dia a dia)."""
     from app.services import groups  # evita import circular
 
@@ -568,7 +700,8 @@ def create_group(db: Session, venue: Venue, data: VenueGroupCreate, actor: User)
             after={"venue_id": venue.id, "admin_user_id": admin_user.id})
     notifications.notify(db, [admin_user.id], NotificationType.MEMBERSHIP, f"Você administra {group.name}",
                          f"{venue.name} criou a pelada e definiu você como administrador.", group_id=group.id)
-    db.commit()
+    if commit:
+        db.commit()
     return link
 
 
@@ -600,6 +733,8 @@ def decide_link(db: Session, venue: Venue, link: VenueGroup, approve: bool, acto
     link.decided_by_id = actor.id
     link.decided_at = utcnow()
     group = db.get(FootballGroup, link.group_id)
+    if approve:
+        _confirm_pending_of_group(db, venue, group.id)
     _record(db, "venue.link_approved" if approve else "venue.link_rejected", "venue_group", link.id, actor,
             group_id=group.id, after={"venue_id": venue.id})
     notifications.notify(
@@ -634,6 +769,7 @@ def end_link(db: Session, link: VenueGroup, actor: User, *, by_venue: bool) -> V
             Match.starts_at > utcnow(),
         )).all():
             match.court_id = None  # o local (texto) continua; o horário sai da agenda do espaço
+            match.booking_status = None
             released += 1
         for series in db.scalars(select(MatchSeries).where(MatchSeries.group_id == group.id,
                                                            MatchSeries.court_id.in_(court_ids))).all():
@@ -717,4 +853,134 @@ def group_link_for_admin(db: Session, group: FootballGroup) -> VenueGroup:
     link = _live_link(db, group.id)
     if link is None:
         raise NotFound("O grupo não tem espaço vinculado", code="no_venue")
+    return link
+
+
+# ------------------------------------------------------------------ horários pedidos por grupos sem vínculo
+
+
+def _venue_match(db: Session, venue: Venue, match_id: int) -> Match:
+    match = db.get(Match, match_id)
+    court = db.get(Court, match.court_id) if match is not None and match.court_id is not None else None
+    if court is None or court.venue_id != venue.id:
+        raise NotFound("Pelada não encontrada na agenda do espaço")
+    return match
+
+
+def booking_out(db: Session, match: Match) -> dict:
+    group = db.get(FootballGroup, match.group_id)
+    court = db.get(Court, match.court_id) if match.court_id is not None else None
+    pending = match.booking_status == BookingStatus.PENDING
+    admins = db.execute(
+        select(User).join(GroupMember, GroupMember.user_id == User.id).where(
+            GroupMember.group_id == group.id, GroupMember.role == GroupRole.ADMIN,
+            GroupMember.status == MemberStatus.ACTIVE,
+        ).order_by(User.name)
+    ).scalars().all() if pending else []  # contato só enquanto o pedido está aberto
+    confirmed = db.scalar(select(func.count()).select_from(MatchPlayer).where(
+        MatchPlayer.match_id == match.id, MatchPlayer.is_referee.is_(False),
+        MatchPlayer.status.in_((AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)))) or 0
+    return {
+        "match_id": match.id, "match_name": match.name, "group_id": group.id, "group_name": group.name,
+        "court_id": court.id if court else None, "court_name": court.name if court else None,
+        "starts_at": match.starts_at, "ends_at": match.ends_at, "booking_status": match.booking_status,
+        "confirmed": confirmed, "slots": match.slots, "created_at": match.created_at,
+        "admins": [{"name": u.name, "email": u.email, "phone": u.phone} for u in admins],
+    }
+
+
+def list_bookings(db: Session, venue: Venue) -> list[Match]:
+    """Horários pendentes (pedidos de grupos sem vínculo) das próximas peladas."""
+    court_ids = [c.id for c in courts_of(db, venue.id)]
+    if not court_ids:
+        return []
+    return list(db.scalars(select(Match).where(
+        Match.court_id.in_(court_ids), Match.booking_status == BookingStatus.PENDING,
+        Match.status != MatchStatus.CANCELLED, Match.ends_at > utcnow(),
+    ).order_by(Match.starts_at)).all())
+
+
+def _confirm_pending_of_group(db: Session, venue: Venue, group_id: int) -> int:
+    """Grupo passou a ser vinculado ao espaço: os outros horários pendentes dele no espaço ficam confirmados."""
+    court_ids = [c.id for c in courts_of(db, venue.id)]
+    pending = db.scalars(select(Match).where(
+        Match.group_id == group_id, Match.court_id.in_(court_ids), Match.booking_status == BookingStatus.PENDING,
+    )).all() if court_ids else []
+    for match in pending:
+        match.booking_status = BookingStatus.CONFIRMED
+    return len(pending)
+
+
+def decide_booking(db: Session, venue: Venue, match_id: int, approve: bool, actor: User,
+                   reason: str | None = None) -> Match:
+    """O DE confirma ou recusa o horário pedido. Confirmar vincula o grupo ao espaço (se ele não tiver outro
+    espaço); recusar tira a quadra da pelada, que continua valendo para os jogadores."""
+    match = _venue_match(db, venue, match_id)
+    if match.booking_status != BookingStatus.PENDING:
+        raise BusinessRuleError("Este horário já foi respondido", code="invalid_status")
+    if match.status == MatchStatus.CANCELLED:
+        raise BusinessRuleError("A pelada foi cancelada", code="invalid_status")
+    group = db.get(FootballGroup, match.group_id)
+    court = db.get(Court, match.court_id)
+    when = notifications.when(match.starts_at)
+    if approve:
+        match.booking_status = BookingStatus.CONFIRMED
+        live = _live_link(db, group.id)
+        if live is None:
+            db.add(VenueGroup(venue_id=venue.id, group_id=group.id, status=VenueLinkStatus.ACTIVE,
+                              origin=VenueLinkOrigin.REQUEST, requested_by_id=match.created_by_id,
+                              decided_by_id=actor.id, decided_at=utcnow()))
+        elif live.venue_id == venue.id and live.status == VenueLinkStatus.PENDING:
+            live.status = VenueLinkStatus.ACTIVE
+            live.decided_by_id = actor.id
+            live.decided_at = utcnow()
+        db.flush()
+        if active_link(db, group.id) is not None and active_link(db, group.id).venue_id == venue.id:
+            _confirm_pending_of_group(db, venue, group.id)
+        title, body = (f"{venue.name} confirmou o horário",
+                       f"{match.name}: {when} na {court.name} está reservado.")
+    else:
+        match.booking_status = BookingStatus.REJECTED
+        match.court_id = None  # o local (texto) continua; o horário sai da agenda do espaço
+        title, body = (f"{venue.name} recusou o horário",
+                       f"{match.name} ({when}) continua marcada, mas sem a quadra."
+                       + (f" Motivo: {reason}" if reason else " Combine outro horário ou local."))
+    _record(db, "venue.booking_confirmed" if approve else "venue.booking_rejected", "match", match.id, actor,
+            group_id=group.id, after={"venue_id": venue.id, "court_id": court.id}, reason=reason)
+    notifications.notify(db, group_admin_ids(db, group.id), NotificationType.VENUE, title, body,
+                         group_id=group.id, match_id=match.id)
+    db.commit()
+    return match
+
+
+# ------------------------------------------------------------------ pelada semanal criada pelo DE
+
+
+def create_weekly_pelada(db: Session, venue: Venue, data: VenuePeladaCreate, actor: User) -> VenueGroup:
+    """O DE marca um horário fixo semanal numa quadra: cria a pelada (grupo), define o administrador e gera as
+    próximas semanas já confirmadas na agenda."""
+    from app.services import matches  # evita import circular
+
+    court = get_court(db, venue, data.court_id)
+    if data.first_starts_at.tzinfo is None:
+        raise BusinessRuleError("Datas devem incluir fuso horário", code="naive_datetime")
+    check_slot(db, court, data.first_starts_at, data.first_starts_at + timedelta(minutes=data.duration_minutes))
+    link = create_group(db, venue, VenueGroupCreate(
+        name=data.name, description=data.description, modality=data.modality or court.modality,
+        admin_email=data.admin_email, admin_name=data.admin_name, rent_hourly_price=data.rent_hourly_price,
+    ), actor, commit=False)
+    group = db.get(FootballGroup, link.group_id)
+    admin_user = users.get_by_email(db, data.admin_email)
+    teams = data.num_teams or 2
+    series_in = SeriesCreate(
+        name=data.name, description=data.description, modality=data.modality or court.modality,
+        court_id=court.id, price=data.price, slots=data.slots, num_teams=teams,
+        field_players_per_team=max(1, data.slots // teams - 1), goalkeepers_per_team=1,
+        responsible_admin_ids=[admin_user.id], recurrence=Recurrence.WEEKLY,
+        first_starts_at=data.first_starts_at, duration_minutes=data.duration_minutes,
+        generate_count=0, auto_generate_ahead=4,
+    )
+    series, _ = matches.create_series(db, group, series_in, actor)
+    # semanas já ocupadas por bloqueio ou outra pelada são puladas (o agendador mantém as próximas criadas)
+    matches.generate_occurrences(db, group, series, 4, actor, skip_conflicts=True)
     return link

@@ -123,6 +123,14 @@ class VenueLinkOrigin(StrEnum):
     REQUEST = "request"  # grupo independente que pediu vínculo
 
 
+class BookingStatus(StrEnum):
+    """Horário da pelada na agenda do espaço."""
+
+    PENDING = "pending"  # marcado por grupo sem vínculo: aguarda o DE confirmar data e horário
+    CONFIRMED = "confirmed"  # marcado pelo DE ou por grupo vinculado ao espaço
+    REJECTED = "rejected"  # o DE recusou: a pelada continua, mas sem a quadra
+
+
 class RentStatus(StrEnum):
     PENDING = "pending"
     PAID = "paid"

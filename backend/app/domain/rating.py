@@ -1,4 +1,4 @@
-"""Regras puras de atributos, média, Tier e atualização de notas (PRD §5 e §7)."""
+"""Regras puras de atributos, média, nível em estrelas e atualização de notas (PRD §5 e §7)."""
 
 from dataclasses import dataclass
 from statistics import median
@@ -21,16 +21,24 @@ ATTRIBUTE_LABELS = {
     "one_on_one": "Um contra um",
 }
 
-# (tier, média mínima) em ordem decrescente
-TIER_THRESHOLDS: tuple[tuple[str, float], ...] = (("S", 4.5), ("A", 3.75), ("B", 3.0), ("C", 2.0), ("D", 0.0))
-TIER_ORDER: tuple[str, ...] = tuple(t for t, _ in TIER_THRESHOLDS)
-TIER_VALUES = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}
-TIER_LABELS = {"S": "Elite", "A": "Avançado", "B": "Intermediário", "C": "Iniciante", "D": "Desenvolvimento"}
+# Nível do jogador em estrelas (0 a 5), derivado da média dos atributos.
+# (estrelas, média mínima) em ordem decrescente; com os padrões, estrelas = média arredondada.
+STAR_THRESHOLDS: tuple[tuple[int, float], ...] = ((5, 4.5), (4, 3.5), (3, 2.5), (2, 1.5), (1, 0.5), (0, 0.0))
+STAR_LEVELS: tuple[int, ...] = tuple(s for s, _ in STAR_THRESHOLDS)  # 5, 4, 3, 2, 1, 0
+MAX_STARS = 5
+STAR_LABELS = {
+    5: "Craque",
+    4: "Avançado",
+    3: "Intermediário",
+    2: "Básico",
+    1: "Iniciante",
+    0: "Em desenvolvimento",
+}
 
 MIN_SCORE = 0.0
 MAX_SCORE = 5.0
-# precisão usada para comparar com os limites de Tier, evitando erro de ponto flutuante (ex.: 4.4999999)
-_TIER_PRECISION = 6
+# precisão usada para comparar com os limites das estrelas, evitando erro de ponto flutuante (ex.: 4.4999999)
+_STAR_PRECISION = 6
 
 
 def attributes_for(
@@ -67,36 +75,88 @@ def compute_average(attributes: dict[str, float], keys: tuple[str, ...] | None =
     return sum(float(attributes[k]) for k in keys) / len(keys)
 
 
-Thresholds = tuple[tuple[str, float], ...]
+Thresholds = tuple[tuple[int, float], ...]
 
 
-def thresholds_from_dict(data: dict[str, float]) -> Thresholds:
-    """{"S": 4.5, "A": 3.75, "B": 3.0, "C": 2.0} → limites em ordem decrescente (D sempre começa em 0)."""
-    return tuple((t, float(data[t])) for t in TIER_ORDER[:-1]) + (("D", 0.0),)
+def thresholds_from_dict(data: dict) -> Thresholds:
+    """{"5": 4.5, "4": 3.5, ...} → limites em ordem decrescente (0 estrela sempre começa em 0).
+
+    As chaves podem vir como texto (JSON) ou inteiro."""
+    clean = {int(k): float(v) for k, v in data.items()}
+    return tuple((s, clean[s]) for s in STAR_LEVELS[:-1]) + ((0, 0.0),)
 
 
 def thresholds_to_dict(thresholds: Thresholds) -> dict[str, float]:
-    return {t: m for t, m in thresholds if t != "D"}
+    return {str(s): m for s, m in thresholds if s != 0}
 
 
-def validate_thresholds(data: dict[str, float]) -> dict[str, float]:
-    expected = set(TIER_ORDER[:-1])
-    if set(data) != expected:
-        raise ValueError(f"Informe a média mínima de {', '.join(TIER_ORDER[:-1])}")
-    values = [float(data[t]) for t in TIER_ORDER[:-1]]
+def validate_thresholds(data: dict) -> dict[str, float]:
+    try:
+        clean = {int(k): float(v) for k, v in data.items()}
+    except (TypeError, ValueError):
+        raise ValueError("Informe a média mínima de 1 a 5 estrelas") from None
+    expected = set(STAR_LEVELS[:-1])
+    if set(clean) != expected:
+        raise ValueError("Informe a média mínima de 1 a 5 estrelas")
+    values = [clean[s] for s in STAR_LEVELS[:-1]]  # 5, 4, 3, 2, 1
     if not all(MIN_SCORE < v <= MAX_SCORE for v in values):
         raise ValueError("As médias mínimas devem estar entre 0 e 5")
     if any(a <= b for a, b in zip(values, values[1:], strict=False)):
-        raise ValueError("Cada Tier precisa de média mínima maior que a do Tier abaixo (S > A > B > C)")
-    return {t: float(data[t]) for t in TIER_ORDER[:-1]}
+        raise ValueError(
+            "Cada nível precisa de média mínima maior que a do nível abaixo (5★ > 4★ > 3★ > 2★ > 1★)"
+        )
+    return {str(s): clean[s] for s in STAR_LEVELS[:-1]}
 
 
-def compute_tier(average: float, thresholds: Thresholds | None = None) -> str:
-    value = round(average, _TIER_PRECISION)
-    for tier, minimum in thresholds or TIER_THRESHOLDS:
+def compute_stars(average: float, thresholds: Thresholds | None = None) -> int:
+    value = round(average, _STAR_PRECISION)
+    for stars, minimum in thresholds or STAR_THRESHOLDS:
         if value >= minimum:
-            return tier
-    return "D"
+            return stars
+    return 0
+
+
+def target_average(stars: int, thresholds: Thresholds | None = None) -> float:
+    """Média no meio da faixa de um nível (com os limites padrão, 4★ = 4,0; 5★ = 4,75; 0★ = 0,25)."""
+    bounds = dict(thresholds or STAR_THRESHOLDS)
+    low = bounds[stars]
+    high = bounds[stars + 1] if stars < MAX_STARS else MAX_SCORE
+    return (low + high) / 2
+
+
+def attributes_for_stars(
+    attributes: dict[str, float], keys: tuple[str, ...], stars: int, thresholds: Thresholds | None = None
+) -> dict[str, float]:
+    """Leva os atributos ao nível `stars` preservando o perfil (pontos fortes e fracos).
+
+    Se o nível já é esse, nada muda. Senão, desloca todos os atributos pela mesma diferença até a média ficar no
+    meio da faixa do nível; se os limites 0 e 5 cortarem demais o deslocamento, usa a média-alvo em todos."""
+    if compute_stars(compute_average(attributes, keys), thresholds) == stars:
+        return {k: float(attributes[k]) for k in keys}
+    target = target_average(stars, thresholds)
+    delta = target - compute_average(attributes, keys)
+    shifted = {k: min(MAX_SCORE, max(MIN_SCORE, float(attributes[k]) + delta)) for k in keys}
+    if compute_stars(compute_average(shifted, keys), thresholds) == stars:
+        return shifted
+    return initial_attributes(keys, target)
+
+
+def star_label(stars: int) -> str:
+    return STAR_LABELS.get(int(stars), "")
+
+
+# Sorteios antigos guardaram o Tier (letra) dos jogadores; equivalência aproximada em estrelas
+LEGACY_TIER_STARS = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}
+
+
+def stars_of(value) -> int:
+    """Nível em estrelas de um valor salvo (inteiro novo ou letra de Tier dos registros antigos)."""
+    if isinstance(value, str) and value in LEGACY_TIER_STARS:
+        return LEGACY_TIER_STARS[value]
+    try:
+        return max(0, min(MAX_STARS, int(value)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def display_average(average: float) -> float:

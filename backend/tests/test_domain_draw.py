@@ -3,7 +3,7 @@ import random
 import pytest
 
 from app.domain import draw as D
-from app.domain.rating import FIELD_ATTRIBUTES, compute_tier
+from app.domain.rating import FIELD_ATTRIBUTES, compute_stars
 
 SKILLS = ["muralha", "foguete", "matador", "maestro", None]
 
@@ -11,7 +11,7 @@ SKILLS = ["muralha", "foguete", "matador", "maestro", None]
 def player(i: int, avg: float, skill: str | None = None, rng: random.Random | None = None) -> D.DrawPlayer:
     rng = rng or random.Random(i)
     attrs = {k: max(0.0, min(5.0, avg + rng.uniform(-0.8, 0.8))) for k in FIELD_ATTRIBUTES}
-    return D.DrawPlayer(id=i, average=avg, tier=compute_tier(avg), attributes=attrs, skill=skill)
+    return D.DrawPlayer(id=i, average=avg, stars=compute_stars(avg), attributes=attrs, skill=skill)
 
 
 def roster(n: int, seed: int = 7) -> list[D.DrawPlayer]:
@@ -32,15 +32,15 @@ def test_every_player_in_exactly_one_team():
     assert all(len(t.field_ids) == 5 for t in res.teams)
 
 
-def test_tier_s_players_are_split_between_teams():
+def test_five_star_players_are_split_between_teams():
     players = [player(1, 4.9), player(2, 4.8), player(3, 4.0), player(4, 3.9)] + [
         player(i, 2.5) for i in range(5, 11)
     ]
     for seed in range(10):
         res = D.run_draw(players, [], D.DrawConfig(num_teams=2, field_per_team=5, goalkeepers_per_team=0,
                                                    seed=seed, time_limit_seconds=0.2))
-        assert team_of(res, 1) != team_of(res, 2), f"seed {seed}: os dois S no mesmo time"
-        assert team_of(res, 3) != team_of(res, 4), f"seed {seed}: os dois A no mesmo time"
+        assert team_of(res, 1) != team_of(res, 2), f"seed {seed}: os dois 5 estrelas no mesmo time"
+        assert team_of(res, 3) != team_of(res, 4), f"seed {seed}: os dois 4 estrelas no mesmo time"
 
 
 def test_balance_is_good_on_random_rosters():
@@ -68,7 +68,7 @@ def test_extra_players_become_reserves_in_priority_order():
 
 def test_goalkeepers_distributed_separately_best_to_weakest_team():
     players = roster(10)
-    gks = [D.DrawGoalkeeper(id=100, average=4.5, tier="S"), D.DrawGoalkeeper(id=101, average=2.0, tier="C")]
+    gks = [D.DrawGoalkeeper(id=100, average=4.5, stars=5), D.DrawGoalkeeper(id=101, average=2.0, stars=2)]
     res = D.run_draw(players, gks, D.DrawConfig(num_teams=2, field_per_team=5, goalkeepers_per_team=1, seed=2,
                                                 time_limit_seconds=0.2))
     assert all(len(t.goalkeeper_ids) == 1 for t in res.teams)
@@ -79,7 +79,7 @@ def test_goalkeepers_distributed_separately_best_to_weakest_team():
 
 
 def test_missing_goalkeepers_produce_warning():
-    res = D.run_draw(roster(10), [D.DrawGoalkeeper(id=100, average=3, tier="B")],
+    res = D.run_draw(roster(10), [D.DrawGoalkeeper(id=100, average=3, stars=3)],
                      D.DrawConfig(num_teams=2, field_per_team=5, goalkeepers_per_team=1, seed=1,
                                   time_limit_seconds=0.2))
     assert any("Goleiros insuficientes" in w for w in res.warnings)
@@ -87,8 +87,8 @@ def test_missing_goalkeepers_produce_warning():
 
 def test_extra_goalkeeper_plays_on_field_when_profile_available():
     gk_field = player(200, 3.0)
-    gks = [D.DrawGoalkeeper(id=100, average=4, tier="A"), D.DrawGoalkeeper(id=101, average=3.5, tier="B"),
-           D.DrawGoalkeeper(id=200, average=2, tier="C", field_profile=gk_field)]
+    gks = [D.DrawGoalkeeper(id=100, average=4, stars=4), D.DrawGoalkeeper(id=101, average=3.5, stars=3),
+           D.DrawGoalkeeper(id=200, average=2, stars=2, field_profile=gk_field)]
     res = D.run_draw(roster(9), gks, D.DrawConfig(num_teams=2, field_per_team=5, goalkeepers_per_team=1, seed=1,
                                                   time_limit_seconds=0.2))
     field_ids = [pid for t in res.teams for pid in t.field_ids]

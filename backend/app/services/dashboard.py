@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.db import utcnow
 from app.domain.enums import AttendanceStatus, EvaluationStatus, MemberStatus
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, User
-from app.services import draws, evaluations, matches, notifications, payments
+from app.services import draws, evaluations, level_quiz, matches, notifications, payments
 from app.services.groups import list_user_groups
 
 
@@ -33,6 +33,7 @@ def admin_dashboard(db: Session, group: FootballGroup, member: GroupMember) -> d
     ).all()
     return {
         "group_id": group.id,
+        **level_quiz.counts(db, group.id),
         "next_match": matches.match_out(db, nxt, member) if nxt else None,
         "total_players": total_players,
         "confirmed": counts.get("confirmed", 0),

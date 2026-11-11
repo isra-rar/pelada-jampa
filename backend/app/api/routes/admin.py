@@ -101,13 +101,13 @@ def set_group_member_role(group_id: int, member_id: int, data: AdminMemberRoleIn
 
 @router.get("/settings", response_model=PlatformSettingsOut)
 def get_settings(admin: PlatformAdmin, db: DB):
-    """Limites dos Tiers e padrões de nota/sorteio aplicados a grupos novos."""
+    """Limites das estrelas e padrões de nota/sorteio aplicados a grupos novos."""
     return platform.settings_out(db)
 
 
 @router.patch("/settings", response_model=PlatformSettingsOut)
 def update_settings(data: PlatformSettingsUpdate, admin: PlatformAdmin, db: DB):
-    """Altera as configurações globais. Mudar os limites dos Tiers reclassifica todas as notas (as médias não
+    """Altera as configurações globais. Mudar os limites das estrelas reclassifica todas as notas (as médias não
     mudam) e registra cada mudança no histórico do jogador. Os padrões só valem para grupos criados depois."""
     return platform.update(db, data, admin)
 

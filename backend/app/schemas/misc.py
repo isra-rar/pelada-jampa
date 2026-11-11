@@ -54,6 +54,8 @@ class AdminDashboard(BaseModel):
     total_pending: Decimal
     evaluations_open: list[MatchOut]
     recent_draws: list[DrawSummaryOut]
+    quiz_not_answered: int = 0  # membros ativos que ainda não responderam o quiz (dispensados não contam)
+    levels_to_review: int = 0  # quizzes respondidos aguardando o administrador confirmar o nível
 
 
 class HomeGroupItem(BaseModel):

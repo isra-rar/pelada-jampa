@@ -4,8 +4,8 @@ Componente de domínio isolado: não conhece banco de dados nem HTTP.
 
 Estratégia:
 1. Elegibilidade: separa jogadores de linha e goleiros, valida quantidade, define reservas.
-2. Construção aleatorizada por Tier: S e A primeiro, cada jogador vai para o time com menos
-   jogadores daquele Tier e menor força acumulada (desempate aleatório).
+2. Construção aleatorizada por nível em estrelas: 5 e 4 estrelas primeiro, cada jogador vai para o time com
+   menos jogadores daquele nível e menor força acumulada (desempate aleatório).
 3. Busca local (hill climbing por trocas) minimizando a função de custo ponderada.
 4. Repete enquanto houver tempo / orçamento de candidatos, guardando composições distintas.
 5. Sorteia uma composição entre as de custo semelhante ao melhor (aleatoriedade controlada),
@@ -22,20 +22,20 @@ import time
 from dataclasses import dataclass, field
 from statistics import mean
 
-from app.domain.rating import FIELD_ATTRIBUTES, TIER_ORDER, TIER_VALUES
+from app.domain.rating import FIELD_ATTRIBUTES, MAX_STARS, STAR_LEVELS
 
 
 class DrawError(ValueError):
     pass
 
 
-DEFAULT_WEIGHTS = {"average": 0.40, "tier": 0.25, "attributes": 0.20, "skills": 0.15}
+DEFAULT_WEIGHTS = {"average": 0.40, "stars": 0.25, "attributes": 0.20, "skills": 0.15}
 SIZE_PENALTY = 10.0
 # Escalas de referência: cada componente vale 1.0 quando atinge a diferença considerada "relevante".
 # Assim os pesos do PRD (40/25/20/15) comparam grandezas equivalentes.
 AVERAGE_SCALE = 0.25  # 0,25 ponto de diferença na média dos times
 ATTRIBUTE_SCALE = 0.5  # 0,5 ponto de diferença média por atributo
-TIER_SCALE = 1.0  # um jogador S "sobrando" em um time
+STARS_SCALE = 1.0  # um jogador 5 estrelas "sobrando" em um time
 SKILL_SCALE = 1.0  # uma habilidade concentrada além do mínimo possível
 
 
@@ -43,7 +43,7 @@ SKILL_SCALE = 1.0  # uma habilidade concentrada além do mínimo possível
 class DrawPlayer:
     id: int
     average: float
-    tier: str
+    stars: int
     attributes: dict[str, float]
     skill: str | None = None
     provisional: bool = False
@@ -53,7 +53,7 @@ class DrawPlayer:
 class DrawGoalkeeper:
     id: int
     average: float
-    tier: str
+    stars: int
     provisional: bool = False
     # perfil de linha, usado se houver goleiros sobrando e ele precisar jogar na linha
     field_profile: DrawPlayer | None = None
@@ -94,6 +94,15 @@ class DrawResult:
     fallback_used: bool
 
 
+def normalize_weights(weights: dict[str, float]) -> dict[str, float]:
+    """Pesos salvos antes das estrelas usavam a chave "tier" para o critério de nível."""
+    if "tier" not in weights:
+        return weights
+    out = {k: v for k, v in weights.items() if k != "tier"}
+    out.setdefault("stars", weights["tier"])
+    return out
+
+
 # --------------------------------------------------------------------------- custo
 
 
@@ -114,14 +123,15 @@ def evaluate(teams: list[list[DrawPlayer]], weights: dict[str, float]) -> tuple[
     strengths = [sum(p.average for p in team) for team in teams]
     average_range = _range(means)
 
-    # Tiers: excesso de concentração em relação ao mínimo matematicamente possível
-    tier_counts = {tier: [sum(1 for p in team if p.tier == tier) for team in teams] for tier in TIER_ORDER}
-    tier_excess = 0.0
-    for tier, counts in tier_counts.items():
+    # Estrelas: excesso de concentração de cada nível em relação ao mínimo matematicamente possível
+    # (concentrar jogadores de nível alto pesa mais; 0 estrela pesa como 1 para não ser ignorado)
+    star_counts = {n: [sum(1 for p in team if p.stars == n) for team in teams] for n in STAR_LEVELS}
+    star_excess = 0.0
+    for n, counts in star_counts.items():
         excess = max(0, (max(counts) - min(counts)) - _min_range(sum(counts), t))
-        tier_excess += TIER_VALUES[tier] * excess
-    tier_means = [mean(TIER_VALUES[p.tier] for p in team) if team else 0.0 for team in teams]
-    tier_cost = tier_excess / TIER_VALUES["S"] + 0.5 * _range(tier_means)
+        star_excess += max(1, n) * excess
+    star_means = [mean(p.stars for p in team) if team else 0.0 for team in teams]
+    stars_cost = star_excess / MAX_STARS + 0.5 * _range(star_means)
 
     # Atributos: diferença média por atributo
     attr_ranges = {}
@@ -142,10 +152,11 @@ def evaluate(teams: list[list[DrawPlayer]], weights: dict[str, float]) -> tuple[
 
     components = {
         "average": average_range / AVERAGE_SCALE,
-        "tier": tier_cost / TIER_SCALE,
+        "stars": stars_cost / STARS_SCALE,
         "attributes": attr_cost / ATTRIBUTE_SCALE,
         "skills": skill_cost / SKILL_SCALE,
     }
+    weights = normalize_weights(weights)
     cost = sum(weights.get(k, 0.0) * v for k, v in components.items()) + size_cost
     metrics = {
         "components": {k: round(v, 4) for k, v in components.items()},
@@ -153,13 +164,13 @@ def evaluate(teams: list[list[DrawPlayer]], weights: dict[str, float]) -> tuple[
         "average_difference": round(average_range, 4),
         "strength_difference": round(_range(strengths), 4),
         "attribute_differences": {k: round(v, 4) for k, v in attr_ranges.items()},
-        "tier_distribution": {tier: counts for tier, counts in tier_counts.items()},
+        "stars_distribution": {str(n): counts for n, counts in star_counts.items()},
     }
     return cost, metrics
 
 
 def team_stats(team: list[DrawPlayer], goalkeepers: list[DrawGoalkeeper]) -> dict:
-    tiers = {tier: sum(1 for p in team if p.tier == tier) for tier in TIER_ORDER}
+    stars = {str(n): sum(1 for p in team if p.stars == n) for n in STAR_LEVELS}
     skills: dict[str, int] = {}
     for p in team:
         if p.skill:
@@ -168,7 +179,7 @@ def team_stats(team: list[DrawPlayer], goalkeepers: list[DrawGoalkeeper]) -> dic
         "players": len(team),
         "average": round(mean(p.average for p in team), 4) if team else 0.0,
         "strength": round(sum(p.average for p in team), 4),
-        "tiers": tiers,
+        "stars": stars,
         "attributes": {
             k: round(mean(p.attributes.get(k, 0.0) for p in team), 4) if team else 0.0 for k in FIELD_ATTRIBUTES
         },
@@ -199,9 +210,9 @@ def _construct(players: list[DrawPlayer], sizes: list[int], rng: random.Random) 
     t = len(sizes)
     teams: list[list[DrawPlayer]] = [[] for _ in range(t)]
     strength = [0.0] * t
-    by_tier = {tier: [p for p in players if p.tier == tier] for tier in TIER_ORDER}
-    for tier in TIER_ORDER:  # S, A primeiro; depois B, C, D pela força acumulada
-        group = by_tier[tier][:]
+    by_stars = {n: [p for p in players if p.stars == n] for n in STAR_LEVELS}
+    for n in STAR_LEVELS:  # 5 e 4 estrelas primeiro; depois os demais níveis pela força acumulada
+        group = by_stars[n][:]
         rng.shuffle(group)
         group.sort(key=lambda p: -p.average)  # estável: empates continuam aleatórios
         for p in group:
@@ -209,7 +220,7 @@ def _construct(players: list[DrawPlayer], sizes: list[int], rng: random.Random) 
             choice = min(
                 open_teams,
                 key=lambda i: (
-                    sum(1 for q in teams[i] if q.tier == tier),
+                    sum(1 for q in teams[i] if q.stars == n),
                     strength[i] / max(1, sizes[i]),
                     rng.random(),
                 ),
@@ -291,7 +302,7 @@ def run_draw(
     rng = random.Random(seed)
     warnings: list[str] = []
     reserves: list[int] = []
-    weights = {**DEFAULT_WEIGHTS, **(config.weights or {})}
+    weights = {**DEFAULT_WEIGHTS, **normalize_weights(config.weights or {})}
 
     # --- Etapa 1: elegibilidade
     gk_needed = config.num_teams * config.goalkeepers_per_team

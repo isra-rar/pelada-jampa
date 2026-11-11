@@ -1,7 +1,7 @@
 """Calibração do sorteio com os placares reais (PRD §9.4 e §21, v2.0).
 
 Cada jogo registrado entre dois times de um sorteio publicado vira uma amostra: de um lado, as diferenças que
-o sorteio deixou entre os dois times em cada critério da função de custo (média, Tiers, atributos e
+o sorteio deixou entre os dois times em cada critério da função de custo (média, estrelas, atributos e
 habilidades); do outro, o placar. A pergunta é: o sorteio gera jogos parelhos? E qual desequilíbrio que sobrou
 mais se traduz em goleada?
 
@@ -21,9 +21,9 @@ from dataclasses import dataclass
 from math import sqrt
 from statistics import mean
 
-from app.domain.rating import FIELD_ATTRIBUTES, TIER_VALUES
+from app.domain.rating import FIELD_ATTRIBUTES, stars_of
 
-CRITERIA: tuple[str, ...] = ("average", "tier", "attributes", "skills")
+CRITERIA: tuple[str, ...] = ("average", "stars", "attributes", "skills")
 MIN_GAMES = 8  # abaixo disso não há sugestão de pesos
 MAX_BLEND = 0.5  # quanto, no máximo, a medição pesa na sugestão
 BLEND_FULL_AT = 60  # com esta quantidade de jogos a mistura chega ao máximo
@@ -40,10 +40,11 @@ class GameSample:
     away_score: int
 
 
-def _tier_mean(stats: dict) -> float:
-    tiers = stats.get("tiers") or {}
-    total = sum(tiers.values())
-    return sum(TIER_VALUES.get(t, 0) * c for t, c in tiers.items()) / total if total else 0.0
+def _stars_mean(stats: dict) -> float:
+    """Média de estrelas do time. Sorteios antigos guardaram a contagem por Tier (letras) em "tiers"."""
+    counts = stats.get("stars") or stats.get("tiers") or {}
+    total = sum(counts.values())
+    return sum(stars_of(level) * c for level, c in counts.items()) / total if total else 0.0
 
 
 def components(a: dict, b: dict) -> dict[str, float]:
@@ -53,7 +54,7 @@ def components(a: dict, b: dict) -> dict[str, float]:
     skill_keys = set(skills_a) | set(skills_b)
     return {
         "average": abs(float(a.get("average", 0.0)) - float(b.get("average", 0.0))),
-        "tier": abs(_tier_mean(a) - _tier_mean(b)),
+        "stars": abs(_stars_mean(a) - _stars_mean(b)),
         "attributes": mean(abs(float(attrs_a.get(k, 0.0)) - float(attrs_b.get(k, 0.0))) for k in FIELD_ATTRIBUTES),
         "skills": (
             sum(abs(skills_a.get(k, 0) - skills_b.get(k, 0)) for k in skill_keys) / len(skill_keys)

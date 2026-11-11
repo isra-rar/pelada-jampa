@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
 from app.core.errors import BusinessRuleError
+from app.domain import rating as R
 from app.domain.enums import AttendanceStatus, GameStatus, MatchStatus, MemberStatus, RatingKind
 from app.models import GroupMember, Match, MatchGame, MatchPlayer, PlayerRating, PlayerRatingHistory
 
@@ -366,18 +367,19 @@ def member_achievements(db: Session, group_id: int, member: GroupMember) -> list
     art.achieved_at = top_months[0] if top_months else None
     badges.append(art)
 
-    # nível S em algum momento
+    # 5 estrelas em algum momento
     reached = db.scalar(
         select(PlayerRatingHistory.created_at)
-        .where(PlayerRatingHistory.member_id == member.id, PlayerRatingHistory.tier_after == "S")
+        .where(PlayerRatingHistory.member_id == member.id, PlayerRatingHistory.stars_after == R.MAX_STARS)
         .order_by(PlayerRatingHistory.created_at)
         .limit(1)
     )
     if reached is None:
         current_s = db.scalar(select(PlayerRating).where(
-            PlayerRating.member_id == member.id, PlayerRating.kind == RatingKind.FIELD, PlayerRating.tier == "S"))
+            PlayerRating.member_id == member.id, PlayerRating.kind == RatingKind.FIELD,
+            PlayerRating.stars == R.MAX_STARS))
         reached = current_s.updated_at if current_s else None
-    craque = _Badge("nivel_s", "Craque", "Alcançou o nível S", "star", current=1 if reached else 0)
+    craque = _Badge("cinco_estrelas", "Craque", "Alcançou 5 estrelas", "star", current=1 if reached else 0)
     craque.achieved_at = reached
     badges.append(craque)
 

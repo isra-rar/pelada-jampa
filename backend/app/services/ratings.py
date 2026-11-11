@@ -1,4 +1,4 @@
-"""Perfil esportivo: atributos, média, Tier e histórico (PRD §5)."""
+"""Perfil esportivo: atributos, média, nível em estrelas (0 a 5) e histórico (PRD §5)."""
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,8 +27,8 @@ def get_rating(db: Session, member_id: int, kind: RatingKind) -> PlayerRating | 
     return db.scalar(select(PlayerRating).where(PlayerRating.member_id == member_id, PlayerRating.kind == kind))
 
 
-def _history(db: Session, rating: PlayerRating, *, reason: str, before: dict | None, avg_before, tier_before,
-             match_id=None, match_scores=None, n=0, weight=0.0, actor_user_id=None) -> None:
+def record_history(db: Session, rating: PlayerRating, *, reason: str, before: dict | None, avg_before,
+                   stars_before, match_id=None, match_scores=None, n=0, weight=0.0, actor_user_id=None) -> None:
     db.add(
         PlayerRatingHistory(
             rating_id=rating.id,
@@ -41,8 +41,8 @@ def _history(db: Session, rating: PlayerRating, *, reason: str, before: dict | N
             match_scores=match_scores,
             average_before=avg_before,
             average_after=rating.average,
-            tier_before=tier_before,
-            tier_after=rating.tier,
+            stars_before=stars_before,
+            stars_after=rating.stars,
             evaluations_count=n,
             weight_applied=weight,
             actor_user_id=actor_user_id,
@@ -61,21 +61,22 @@ def ensure_rating(db: Session, group: FootballGroup, member: GroupMember, kind: 
             kind=kind,
             attributes=attrs,
             average=avg,
-            tier=R.compute_tier(avg, platform.tier_thresholds(db)),
+            stars=R.compute_stars(avg, platform.star_thresholds(db)),
             is_provisional=True,
             updated_at=utcnow(),
         )
         db.add(rating)
         db.flush()
-        _history(db, rating, reason="initial", before=None, avg_before=None, tier_before=None)
+        record_history(db, rating, reason="initial", before=None, avg_before=None, stars_before=None)
     elif set(rating.attributes) != set(keys):
         # o grupo trocou o modo de avaliação de goleiros: reinicia preservando o nível médio
-        before, avg_before, tier_before = dict(rating.attributes), rating.average, rating.tier
+        before, avg_before, stars_before = dict(rating.attributes), rating.average, rating.stars
         rating.attributes = R.initial_attributes(keys, rating.average)
         rating.average = R.compute_average(rating.attributes, keys)
-        rating.tier = R.compute_tier(rating.average, platform.tier_thresholds(db))
+        rating.stars = R.compute_stars(rating.average, platform.star_thresholds(db))
         rating.updated_at = utcnow()
-        _history(db, rating, reason="mode_change", before=before, avg_before=avg_before, tier_before=tier_before)
+        record_history(db, rating, reason="mode_change", before=before, avg_before=avg_before,
+                       stars_before=stars_before)
     return rating
 
 
@@ -93,8 +94,8 @@ def to_out(rating: PlayerRating) -> dict:
         "labels": {k: R.ATTRIBUTE_LABELS[k] for k in rating.attributes},
         "average": rating.average,
         "average_display": R.display_average(rating.average),
-        "tier": rating.tier,
-        "tier_label": R.TIER_LABELS[rating.tier],
+        "stars": rating.stars,
+        "stars_label": R.star_label(rating.stars),
         "is_provisional": rating.is_provisional,
         "valid_evaluations_count": rating.valid_evaluations_count,
         "matches_evaluated_count": rating.matches_evaluated_count,
@@ -123,13 +124,13 @@ def set_provisional(
         clean = R.validate_scores(attributes, keys)
     except ValueError as exc:
         raise BusinessRuleError(str(exc), code="invalid_attributes") from None
-    before, avg_before, tier_before = dict(rating.attributes), rating.average, rating.tier
+    before, avg_before, stars_before = dict(rating.attributes), rating.average, rating.stars
     rating.attributes = clean
     rating.average = R.compute_average(clean, keys)
-    rating.tier = R.compute_tier(rating.average, platform.tier_thresholds(db))
+    rating.stars = R.compute_stars(rating.average, platform.star_thresholds(db))
     rating.updated_at = utcnow()
-    _history(db, rating, reason="admin_provisional", before=before, avg_before=avg_before, tier_before=tier_before,
-             actor_user_id=actor_user_id)
+    record_history(db, rating, reason="admin_provisional", before=before, avg_before=avg_before,
+                   stars_before=stars_before, actor_user_id=actor_user_id)
     audit.record(
         db,
         action="rating.provisional_set",
@@ -137,8 +138,8 @@ def set_provisional(
         entity_id=rating.id,
         actor_user_id=actor_user_id,
         group_id=group.id,
-        before={"attributes": before, "average": avg_before, "tier": tier_before},
-        after={"attributes": clean, "average": rating.average, "tier": rating.tier},
+        before={"attributes": before, "average": avg_before, "stars": stars_before},
+        after={"attributes": clean, "average": rating.average, "stars": rating.stars},
         reason=reason,
     )
     return rating
@@ -162,17 +163,17 @@ def apply_match_result(
     new_attrs, weight = R.update_attributes(
         rating.attributes, match_scores, n, rating.is_provisional, keys, params_for(group)
     )
-    before, avg_before, tier_before = dict(rating.attributes), rating.average, rating.tier
+    before, avg_before, stars_before = dict(rating.attributes), rating.average, rating.stars
     rating.attributes = new_attrs
     rating.average = R.compute_average(new_attrs, keys)
-    rating.tier = R.compute_tier(rating.average, platform.tier_thresholds(db))
+    rating.stars = R.compute_stars(rating.average, platform.star_thresholds(db))
     rating.valid_evaluations_count += n
     rating.matches_evaluated_count += 1
     if rating.valid_evaluations_count >= group.min_evaluations_to_consolidate:
         rating.is_provisional = False
     rating.updated_at = utcnow()
-    _history(db, rating, reason="match", before=before, avg_before=avg_before, tier_before=tier_before,
-             match_id=match_id, match_scores=match_scores, n=n, weight=weight)
+    record_history(db, rating, reason="match", before=before, avg_before=avg_before, stars_before=stars_before,
+                   match_id=match_id, match_scores=match_scores, n=n, weight=weight)
     return rating
 
 
@@ -199,5 +200,7 @@ def explanation(db: Session, group: FootballGroup) -> dict:
         "provisional_match_weight": group.provisional_match_weight,
         "min_evaluators_full_weight": group.min_evaluators_full_weight,
         "min_evaluations_to_consolidate": group.min_evaluations_to_consolidate,
-        "tiers": {t: f"{R.TIER_LABELS[t]} (média ≥ {m:.2f})" for t, m in platform.tier_thresholds(db)},
+        "stars": {
+            str(n): f"{n}★ {R.star_label(n)} (média ≥ {m:.2f})" for n, m in platform.star_thresholds(db)
+        },
     }

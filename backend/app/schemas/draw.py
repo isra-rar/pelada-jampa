@@ -20,7 +20,7 @@ class DrawCreate(BaseModel):
     def _weights(cls, v):
         if v is None:
             return v
-        allowed = {"average", "tier", "attributes", "skills"}
+        allowed = {"average", "stars", "attributes", "skills"}
         if set(v) - allowed:
             raise ValueError(f"Pesos permitidos: {sorted(allowed)}")
         if any(w < 0 for w in v.values()):
@@ -33,7 +33,7 @@ class TeamPlayerOut(BaseModel):
     name: str
     photo_url: str | None
     is_goalkeeper: bool
-    tier: str
+    stars: int
     average_display: float
     special_skill: str | None
     is_provisional: bool

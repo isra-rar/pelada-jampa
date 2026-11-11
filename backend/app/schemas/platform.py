@@ -32,19 +32,19 @@ class PlatformGroupDefaults(BaseModel):
 
 
 class PlatformSettingsUpdate(BaseModel):
-    tier_thresholds: dict[str, float] | None = None
+    star_thresholds: dict[str, float] | None = None
     group_defaults: PlatformGroupDefaults | None = None
     reason: str | None = Field(default=None, max_length=300)
 
-    @field_validator("tier_thresholds")
+    @field_validator("star_thresholds")
     @classmethod
     def _thresholds(cls, v: dict[str, float] | None):
         return None if v is None else R.validate_thresholds(v)
 
 
 class PlatformSettingsOut(BaseModel):
-    tier_thresholds: dict[str, float]
-    tier_labels: dict[str, str]
+    star_thresholds: dict[str, float]  # {"5": 4.5, "4": 3.5, ...}: média mínima de cada nível
+    star_labels: dict[str, str]
     group_defaults: dict
     updated_at: datetime | None
-    recalculated_ratings: int | None = None  # preenchido quando a mudança de limites recalcula Tiers
+    recalculated_ratings: int | None = None  # preenchido quando a mudança de limites recalcula estrelas

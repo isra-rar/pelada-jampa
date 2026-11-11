@@ -141,7 +141,8 @@ def group_admin_user_ids(db: Session, group_id: int) -> list[int]:
 
 
 def on_member_activated(db: Session, group: FootballGroup, member: GroupMember) -> None:
-    """Cria o perfil esportivo provisório e inclui o jogador nas próximas peladas publicadas."""
+    """Cria o perfil esportivo provisório e inclui o jogador nas próximas peladas publicadas. O quiz de
+    autoavaliação fica pendente enquanto o membro ativo não responder (`level_quiz.is_pending`)."""
     ratings.ensure_member_ratings(db, group, member)
     upcoming = db.scalars(
         select(Match).where(

@@ -1,11 +1,12 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.domain.enums import GoalkeeperRatingMode, GroupRole, MemberStatus, Modality, Position
 from app.schemas.common import ORMModel
 
-_WEIGHT_KEYS = {"average", "tier", "attributes", "skills"}
+_WEIGHT_KEYS = {"average", "stars", "attributes", "skills"}
 
 
 class GroupSettings(BaseModel):
@@ -102,6 +103,8 @@ class GroupOut(ORMModel):
     created_at: datetime
     my_role: GroupRole | None = None
     my_member_id: int | None = None
+    # o jogador ainda precisa responder o quiz de autoavaliação deste grupo
+    my_self_assessment_pending: bool = False
     invite_token: str | None = None  # apenas para administradores
 
 
@@ -137,6 +140,24 @@ class SkillUpdate(BaseModel):
     is_active: bool | None = None
 
 
+class MemberSelfAssessment(BaseModel):
+    """Situação do quiz de autoavaliação do membro."""
+
+    # exempt = dispensado (perfil já consolidado pelas avaliações)
+    status: Literal["not_answered", "to_review", "confirmed", "exempt"]
+    kind: Literal["field", "goalkeeper"] | None = None  # quiz de linha ou de goleiro
+    answered_at: datetime | None = None
+    quiz_stars: int | None = None  # nível calculado pelas respostas
+    declared_stars: int | None = None  # nível que o jogador diz ter
+    confirmed_stars: int | None = None  # nível confirmado/ajustado pelo administrador
+    reviewed_at: datetime | None = None
+    reminded_at: datetime | None = None  # último lembrete para responder
+    current_stars: int | None = None  # nível atual (linha ou goleiro, conforme o quiz)
+    matches_evaluated: int = 0
+    # nível declarado × avaliações, depois de algumas peladas avaliadas: over | under | accurate
+    self_estimate: Literal["over", "under", "accurate"] | None = None
+
+
 class MemberOut(BaseModel):
     id: int
     user_id: int
@@ -150,6 +171,12 @@ class MemberOut(BaseModel):
     special_skill: SkillOut | None
     pending_skill: SkillOut | None
     joined_at: datetime
+    self_assessment: MemberSelfAssessment | None = None  # visível para administradores e o próprio usuário
+
+
+class LevelReviewIn(BaseModel):
+    stars: int = Field(ge=0, le=5)  # nível confirmado (ou ajustado) pelo administrador
+    reason: str | None = Field(default=None, max_length=300)
 
 
 class MemberAdd(BaseModel):

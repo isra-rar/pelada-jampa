@@ -130,7 +130,7 @@ def test_finance_csv_export(apiclient, clock):
 
 def test_calibration_domain_suggests_normalized_weights():
     def stats(avg, defense):
-        return {"average": avg, "tiers": {"B": 5}, "attributes": {"finishing": 3, "passing": 3, "dribbling": 3,
+        return {"average": avg, "stars": {"3": 5}, "attributes": {"finishing": 3, "passing": 3, "dribbling": 3,
                                                                     "defense": defense, "physical": 3},
                 "skills": {}}
 
@@ -138,7 +138,7 @@ def test_calibration_domain_suggests_normalized_weights():
     for i in range(12):  # quanto maior a diferença de média, maior o placar
         gap = i * 0.05
         samples.append(C.GameSample(stats(3.0 + gap, 3.0), stats(3.0, 3.0), i // 2, 0))
-    out = C.analyze(samples, {"average": 0.4, "tier": 0.25, "attributes": 0.2, "skills": 0.15})
+    out = C.analyze(samples, {"average": 0.4, "stars": 0.25, "attributes": 0.2, "skills": 0.15})
     assert out["games"] == 12 and out["status"] in ("bom", "regular", "ruim")
     assert out["correlations"]["average"] > 0.9
     sug = out["suggested_weights"]

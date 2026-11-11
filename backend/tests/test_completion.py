@@ -189,35 +189,36 @@ def test_platform_settings_thresholds_and_group_defaults(apiclient, db):
     _make_platform_admin(db, admin)
 
     s = api.get("/admin/settings", admin)
-    assert s["tier_thresholds"] == {"S": 4.5, "A": 3.75, "B": 3.0, "C": 2.0}
+    assert s["star_thresholds"] == {"5": 4.5, "4": 3.5, "3": 2.5, "2": 1.5, "1": 0.5}
+    assert s["star_labels"]["5"] == "Craque"
     assert s["group_defaults"]["initial_rating"] == 2.5
     member = players[0]["_member_id"]
-    assert api.get(f"{G}/{gid}/players/{member}", admin)["ratings"][0]["tier"] == "C"  # média inicial 2,5
+    assert api.get(f"{G}/{gid}/players/{member}", admin)["ratings"][0]["stars"] == 3  # média inicial 2,5
 
-    api.patch("/admin/settings", admin, 422, json={"tier_thresholds": {"S": 4.0, "A": 4.2, "B": 3.0, "C": 2.0}})
-    api.patch("/admin/settings", admin, 422, json={"tier_thresholds": {"S": 4.5}})
+    api.patch("/admin/settings", admin, 422, json={"star_thresholds": {"5": 4.0, "4": 4.2, "3": 3.0, "2": 2.0, "1": 1.0}})
+    api.patch("/admin/settings", admin, 422, json={"star_thresholds": {"5": 4.5}})
     out = api.patch("/admin/settings", admin, json={
-        "tier_thresholds": {"S": 4.5, "A": 3.75, "B": 2.5, "C": 1.5}, "reason": "Calibração",
+        "star_thresholds": {"5": 4.5, "4": 3.5, "3": 3.0, "2": 2.0, "1": 1.0}, "reason": "Calibração",
     })
     assert out["recalculated_ratings"] == 3  # admin + 2 jogadores
     profile = api.get(f"{G}/{gid}/players/{member}", admin)
-    assert profile["ratings"][0]["tier"] == "B" and profile["ratings"][0]["average"] == 2.5
-    assert profile["rating_explanation"]["tiers"]["B"].endswith("2.50)")
+    assert profile["ratings"][0]["stars"] == 2 and profile["ratings"][0]["average"] == 2.5
+    assert profile["rating_explanation"]["stars"]["2"].endswith("2.00)")
     hist = api.get(f"{G}/{gid}/players/{member}/rating-history", admin)["items"]
-    assert hist[0]["reason"] == "tier_thresholds" and hist[0]["tier_before"] == "C"
+    assert hist[0]["reason"] == "star_thresholds" and hist[0]["stars_before"] == 3
     # repetir os mesmos limites não reclassifica nada
     assert api.patch("/admin/settings", admin, json={
-        "tier_thresholds": {"S": 4.5, "A": 3.75, "B": 2.5, "C": 1.5}})["recalculated_ratings"] is None
+        "star_thresholds": {"5": 4.5, "4": 3.5, "3": 3.0, "2": 2.0, "1": 1.0}})["recalculated_ratings"] is None
 
     api.patch("/admin/settings", admin, json={"group_defaults": {"initial_rating": 3.0,
                                                                   "draw_weights": {"average": 0.6}}})
     new_group = api.post(G, admin, 201, json={"name": "Grupo novo"})
     assert new_group["initial_rating"] == 3.0
-    assert new_group["draw_weights"] == {"average": 0.6, "tier": 0.25, "attributes": 0.20, "skills": 0.15}
+    assert new_group["draw_weights"] == {"average": 0.6, "stars": 0.25, "attributes": 0.20, "skills": 0.15}
     custom = api.post(G, admin, 201, json={"name": "Grupo próprio", "initial_rating": 1.0})
     assert custom["initial_rating"] == 1.0
     assert api.get(f"{G}/{gid}", admin)["initial_rating"] == 2.5  # grupos existentes não mudam
-    assert api.get(f"{G}/{new_group['id']}/players/me", admin)["ratings"][0]["tier"] == "B"
+    assert api.get(f"{G}/{new_group['id']}/players/me", admin)["ratings"][0]["stars"] == 3
 
 
 # ------------------------------------------------------------------ LGPD

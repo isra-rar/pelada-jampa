@@ -7,10 +7,11 @@ from app.core.config import settings
 from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, NotFound
 from app.domain import draw as D
+from app.domain import rating as R
 from app.domain.enums import AttendanceStatus, DrawStatus, MatchStatus, MemberStatus, NotificationType, RatingKind
 from app.models import Draw, FootballGroup, GroupMember, Match, MatchPlayer, Team, TeamPlayer, User
 from app.schemas.draw import DrawCreate, PlayerMove
-from app.services import audit, notifications, ratings
+from app.services import audit, level_quiz, notifications, ratings
 
 TEAM_NAMES = ["Time A", "Time B", "Time C", "Time D", "Time E", "Time F", "Time G", "Time H"]
 
@@ -52,7 +53,7 @@ def _snapshot_player(db: Session, group: FootballGroup, mp: MatchPlayer, as_goal
         "is_goalkeeper": as_goalkeeper,
         "field": {
             "average": field.average,
-            "tier": field.tier,
+            "stars": field.stars,
             "attributes": dict(field.attributes),
             "provisional": field.is_provisional,
         },
@@ -61,14 +62,15 @@ def _snapshot_player(db: Session, group: FootballGroup, mp: MatchPlayer, as_goal
     }
     if as_goalkeeper:
         gk = ratings.ensure_rating(db, group, member, RatingKind.GOALKEEPER)
-        snap["goalkeeper"] = {"average": gk.average, "tier": gk.tier, "provisional": gk.is_provisional}
+        snap["goalkeeper"] = {"average": gk.average, "stars": gk.stars, "provisional": gk.is_provisional}
     return snap
 
 
 def _field_player(snap: dict) -> D.DrawPlayer:
     f = snap["field"]
     return D.DrawPlayer(
-        id=snap["member_id"], average=f["average"], tier=f["tier"], attributes=f["attributes"],
+        id=snap["member_id"], average=f["average"], stars=R.stars_of(f.get("stars", f.get("tier"))),
+        attributes=f["attributes"],
         skill=snap["skill"], provisional=f["provisional"],
     )
 
@@ -76,7 +78,8 @@ def _field_player(snap: dict) -> D.DrawPlayer:
 def _goalkeeper(snap: dict) -> D.DrawGoalkeeper:
     g = snap["goalkeeper"]
     return D.DrawGoalkeeper(
-        id=snap["member_id"], average=g["average"], tier=g["tier"], provisional=g["provisional"],
+        id=snap["member_id"], average=g["average"], stars=R.stars_of(g.get("stars", g.get("tier"))),
+        provisional=g["provisional"],
         field_profile=_field_player(snap),
     )
 
@@ -110,6 +113,12 @@ def create_draw(db: Session, group: FootballGroup, match: Match, data: DrawCreat
         result = D.run_draw(field, gks, config)
     except D.DrawError as exc:
         raise BusinessRuleError(str(exc), code="draw_invalid") from None
+    reserves = set(result.reserves)
+    unconfirmed = level_quiz.unconfirmed_count(db, [mp.member for mp in eligible if mp.member_id not in reserves])
+    if unconfirmed:
+        result.warnings.append(
+            f"{unconfirmed} jogador(es) com nível ainda não confirmado (quiz pendente ou aguardando o admin)"
+        )
 
     sequence = (db.scalar(select(func.max(Draw.sequence)).where(Draw.match_id == match.id)) or 0) + 1
     draw = Draw(
@@ -188,7 +197,7 @@ def draw_out(draw: Draw) -> dict:
                     "name": tp.member.display_name,
                     "photo_url": tp.member.user.photo_url,
                     "is_goalkeeper": tp.is_goalkeeper,
-                    "tier": src.get("tier", "D"),
+                    "stars": R.stars_of(src.get("stars", src.get("tier"))),
                     "average_display": round(src.get("average", 0.0) + 1e-9, 1),
                     "special_skill": snap.get("skill_name"),
                     "is_provisional": src.get("provisional", False),

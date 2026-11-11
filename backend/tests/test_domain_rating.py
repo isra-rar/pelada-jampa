@@ -15,18 +15,33 @@ def test_average_is_mean_of_five_attributes():
 
 
 @pytest.mark.parametrize(
-    "avg,tier",
-    [(5.0, "S"), (4.5, "S"), (4.49, "A"), (3.75, "A"), (3.74, "B"), (3.0, "B"), (2.99, "C"), (2.0, "C"),
-     (1.99, "D"), (0.0, "D")],
+    "avg,stars",
+    [(5.0, 5), (4.5, 5), (4.49, 4), (3.5, 4), (3.49, 3), (2.5, 3), (2.49, 2), (1.5, 2), (1.49, 1), (0.5, 1),
+     (0.49, 0), (0.0, 0)],
 )
-def test_tier_thresholds(avg, tier):
-    assert R.compute_tier(avg) == tier
+def test_star_thresholds(avg, stars):
+    assert R.compute_stars(avg) == stars
 
 
-def test_tier_is_robust_to_floating_point_error():
+def test_stars_are_robust_to_floating_point_error():
     # 4.5 calculado por média ponderada pode virar 4.4999999999 em float
-    assert R.compute_tier(4.499999999999) == "S"
-    assert R.compute_tier(4.4999) == "A"
+    assert R.compute_stars(4.499999999999) == 5
+    assert R.compute_stars(4.4999) == 4
+
+
+def test_custom_star_thresholds_and_validation():
+    data = R.validate_thresholds({"5": 4.8, "4": 4.0, "3": 3.0, "2": 2.0, "1": 1.0})
+    thresholds = R.thresholds_from_dict(data)
+    assert R.compute_stars(4.5, thresholds) == 4 and R.compute_stars(0.9, thresholds) == 0
+    assert R.thresholds_to_dict(thresholds) == data
+    with pytest.raises(ValueError):
+        R.validate_thresholds({"5": 4.0, "4": 4.2, "3": 3.0, "2": 2.0, "1": 1.0})  # fora de ordem
+    with pytest.raises(ValueError):
+        R.validate_thresholds({"5": 4.5})
+
+
+def test_stars_of_reads_legacy_tiers():
+    assert [R.stars_of(v) for v in ("S", "A", "B", "C", "D", 3, "4", None, 9)] == [5, 4, 3, 2, 1, 3, 4, 0, 5]
 
 
 def test_display_average_one_decimal():

@@ -89,13 +89,13 @@ def test_profile_starts_provisional_and_admin_can_set_initial(apiclient):
     gid, mid = group["id"], players[0]["_member_id"]
     prof = api.get(f"{G}/{gid}/players/me", players[0])
     field = prof["ratings"][0]
-    assert field["is_provisional"] and field["tier"] == "C" and field["average"] == 2.5
+    assert field["is_provisional"] and field["stars"] == 3 and field["average"] == 2.5
     api.put(f"{G}/{gid}/players/{mid}/provisional-rating", players[0], 403,
             json={"attributes": {k: 5 for k in field["attributes"]}})
     r = api.put(f"{G}/{gid}/players/{mid}/provisional-rating", admin,
                 json={"attributes": {"finishing": 5, "passing": 4.5, "dribbling": 4.5, "defense": 4.5,
                                      "physical": 4.0}})
-    assert r["average"] == 4.5 and r["tier"] == "S" and r["is_provisional"]
+    assert r["average"] == 4.5 and r["stars"] == 5 and r["is_provisional"]
 
 
 # ------------------------------------------------------------------ confirmação / lista de espera

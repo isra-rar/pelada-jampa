@@ -64,7 +64,29 @@ python scripts/make_platform_admin.py voce@exemplo.com            # --remover ti
 - **Peladas** avulsas e recorrentes, confirmação, lista de espera, presença efetiva. Cada recorrência mantém
   `auto_generate_ahead` ocorrências futuras criadas e publicadas pelo agendador (0 = só geração manual);
   ocorrências canceladas não contam.
-- **Perfil esportivo**: atributos, média, Tier, notas provisórias, histórico.
+- **Perfil esportivo**: atributos, média, nível em estrelas (0 a 5; com os limites padrão, a média
+  arredondada), notas provisórias, histórico.
+- **Quiz de nível** (`app/services/level_quiz.py`; `GET|POST /groups/{id}/self-assessment`): cinco perguntas
+  simples (de linha: finalização, passe, drible, defesa, físico; ou de goleiro, em grupos com avaliação própria
+  de goleiro: reflexo, posicionamento, saída do gol, reposição, um contra um) e, no fim, o nível (0 a 5
+  estrelas) que o jogador acha que tem. Quem responde "no gol" passa a ser goleiro no grupo.
+  - Pendente para todo membro ativo que ainda não respondeu, inclusive quem já estava no grupo
+    (`GroupOut.my_self_assessment_pending`). Quem já tem perfil consolidado pelas avaliações fica dispensado.
+    `MemberOut.self_assessment.status` = `not_answered | to_review | confirmed | exempt`, visível ao admin e ao
+    próprio jogador.
+  - As respostas viram a nota inicial provisória (a opção mais alta vale 4,5) se o perfil ainda não tem
+    avaliações nem nota do admin; esse nível vale até um admin confirmar ou ajustar o nível declarado
+    (`POST /groups/{id}/members/{member_id}/level-review`), que leva a nota ao nível escolhido enquanto o perfil
+    é provisório (os atributos andam juntos, preservando os pontos fortes). Depois, as avaliações pós-pelada
+    seguem ajustando.
+  - O próprio nível de um admin só é confirmado por outro admin; se ele é o único, o nível declarado vale na
+    hora.
+  - Lembretes para quem não respondeu: o admin manda na hora (`POST /groups/{id}/self-assessment/remind`, no
+    máximo a cada 12 horas por jogador) e o agendador lembra a cada 3 dias, até 3 vezes, das 9h às 21h.
+  - O sorteio avisa quantos jogadores ainda estão sem nível confirmado. Depois de 3 peladas avaliadas,
+    `self_estimate` compara o nível declarado com o atual (`over | under | accurate`).
+  - O painel do admin conta quem não respondeu e quantos níveis aguardam; os admins são avisados a cada quiz
+    respondido. As respostas entram na exportação de dados (LGPD) e são apagadas na exclusão da conta.
 - **Avaliação pós-jogo** com janela, antimanipulação e consolidação.
 - **Financeiro** (só controle: o pagamento é feito por fora do app): cobrança por pelada, quitação em lote,
   pendências, isenção/estorno; regras opcionais de cobrança para quem falta sem avisar ou desiste fora do prazo;
@@ -112,7 +134,7 @@ python scripts/make_platform_admin.py voce@exemplo.com            # --remover ti
 - **Notificações** internas + Web Push opcional (inclui aviso de resultado para quem jogou).
 - **Métricas de sucesso** (PRD §21): `GET /groups/{id}/metrics` (respostas, ocupação, desistências, avaliações,
   pagamentos, equilíbrio dos sorteios, retenção) e `GET /admin/metrics` (usuários, grupos ativos, retenção).
-- **Configurações globais** (`/admin/settings`, só administrador da plataforma): limites dos Tiers (mudar
+- **Configurações globais** (`/admin/settings`, só administrador da plataforma): limites das estrelas (mudar
   reclassifica todas as notas e registra no histórico) e padrões de nota/sorteio para grupos novos.
 - **Gestão de grupos pela plataforma** (`/admin/groups`): filtros por situação (ativos, suspensos,
   desativados, sem administrador), dados de suporte do grupo, suspensão com motivo (o grupo fica inativo e

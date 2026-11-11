@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
         version="1.0.0",
         description=(
             "API do Pelada+: organização de peladas, confirmação e lista de espera, perfis esportivos com "
-            "Tier, avaliações pós-jogo, controle financeiro e sorteio inteligente de times."
+            "nível em estrelas, avaliações pós-jogo, controle financeiro e sorteio inteligente de times."
         ),
         lifespan=lifespan,
         # em produção a documentação interativa fica fechada (o front não usa o openapi.json)

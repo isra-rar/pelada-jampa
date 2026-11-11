@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.db import SessionLocal, utcnow
 from app.domain.enums import AttendanceStatus, MatchStatus, NotificationType
 from app.models import FootballGroup, Match, MatchPlayer
-from app.services import attendance, evaluations, matches, notifications, payments, pros, venue_finance
+from app.services import attendance, evaluations, level_quiz, matches, notifications, payments, pros, venue_finance
 
 log = logging.getLogger("pelada.scheduler")
 
@@ -90,6 +90,7 @@ def run_jobs_once() -> dict:
             ("rent_charges", venue_finance.sync_rent_job),
             ("debt_reminders", payments.send_debt_reminders),
             ("hires_expired", pros.expire_due),
+            ("quiz_reminders", level_quiz.send_auto_reminders),
         ):
             try:
                 results[name] = job(db)

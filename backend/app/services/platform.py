@@ -1,4 +1,4 @@
-"""Configurações globais da plataforma (PRD §2): limites dos Tiers e padrões de grupos novos."""
+"""Configurações globais da plataforma (PRD §2): limites das estrelas e padrões de grupos novos."""
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -35,16 +35,16 @@ def _effective(db: Session) -> dict:
     if cached is not None:
         return cached
     row = _row(db)
-    thresholds = R.thresholds_to_dict(R.TIER_THRESHOLDS)
+    thresholds = R.thresholds_to_dict(R.STAR_THRESHOLDS)
     defaults = {**DEFAULT_GROUP_DEFAULTS, "draw_weights": dict(DEFAULT_GROUP_DEFAULTS["draw_weights"])}
     if row is not None:
-        thresholds.update(row.tier_thresholds or {})
+        thresholds.update({str(k): float(v) for k, v in (row.star_thresholds or {}).items()})
         stored = dict(row.group_defaults or {})
         if "draw_weights" in stored:
             defaults["draw_weights"].update(stored.pop("draw_weights") or {})
         defaults.update(stored)
     value = {
-        "tier_thresholds": thresholds,
+        "star_thresholds": thresholds,
         "group_defaults": defaults,
         "updated_at": row.updated_at if row is not None else None,
     }
@@ -52,8 +52,8 @@ def _effective(db: Session) -> dict:
     return value
 
 
-def tier_thresholds(db: Session) -> R.Thresholds:
-    return R.thresholds_from_dict(_effective(db)["tier_thresholds"])
+def star_thresholds(db: Session) -> R.Thresholds:
+    return R.thresholds_from_dict(_effective(db)["star_thresholds"])
 
 
 def group_defaults(db: Session) -> dict:
@@ -64,36 +64,36 @@ def group_defaults(db: Session) -> dict:
 def settings_out(db: Session, recalculated: int | None = None) -> dict:
     eff = _effective(db)
     return {
-        "tier_thresholds": eff["tier_thresholds"],
-        "tier_labels": R.TIER_LABELS,
+        "star_thresholds": eff["star_thresholds"],
+        "star_labels": {str(n): label for n, label in R.STAR_LABELS.items()},
         "group_defaults": eff["group_defaults"],
         "updated_at": eff["updated_at"],
         "recalculated_ratings": recalculated,
     }
 
 
-def recalculate_tiers(db: Session, thresholds: R.Thresholds, actor_user_id: int) -> int:
-    """Reclassifica todas as notas com os novos limites. Médias não mudam; cada Tier alterado gera histórico."""
+def recalculate_stars(db: Session, thresholds: R.Thresholds, actor_user_id: int) -> int:
+    """Reclassifica todas as notas com os novos limites. Médias não mudam; cada nível alterado gera histórico."""
     changed = 0
     for rating in db.scalars(select(PlayerRating)).all():
-        new_tier = R.compute_tier(rating.average, thresholds)
-        if new_tier == rating.tier:
+        new_stars = R.compute_stars(rating.average, thresholds)
+        if new_stars == rating.stars:
             continue
-        before = rating.tier
-        rating.tier = new_tier
+        before = rating.stars
+        rating.stars = new_stars
         db.add(PlayerRatingHistory(
             rating_id=rating.id,
             member_id=rating.member_id,
             kind=rating.kind,
             match_id=None,
-            reason="tier_thresholds",
+            reason="star_thresholds",
             attributes_before=dict(rating.attributes),
             attributes_after=dict(rating.attributes),
             match_scores=None,
             average_before=rating.average,
             average_after=rating.average,
-            tier_before=before,
-            tier_after=new_tier,
+            stars_before=before,
+            stars_after=new_stars,
             evaluations_count=0,
             weight_applied=0.0,
             actor_user_id=actor_user_id,
@@ -106,12 +106,12 @@ def update(db: Session, data: PlatformSettingsUpdate, actor: User) -> dict:
     before = settings_out(db)
     row = _row(db)
     if row is None:
-        row = PlatformSettings(id=_SETTINGS_ID, tier_thresholds={}, group_defaults={})
+        row = PlatformSettings(id=_SETTINGS_ID, star_thresholds={}, group_defaults={})
         db.add(row)
     recalculated = None
-    if data.tier_thresholds is not None and data.tier_thresholds != before["tier_thresholds"]:
-        row.tier_thresholds = data.tier_thresholds
-        recalculated = recalculate_tiers(db, R.thresholds_from_dict(data.tier_thresholds), actor.id)
+    if data.star_thresholds is not None and data.star_thresholds != before["star_thresholds"]:
+        row.star_thresholds = data.star_thresholds
+        recalculated = recalculate_stars(db, R.thresholds_from_dict(data.star_thresholds), actor.id)
     if data.group_defaults is not None:
         changes = data.group_defaults.model_dump(exclude_none=True)
         stored = dict(row.group_defaults or {})
@@ -126,8 +126,8 @@ def update(db: Session, data: PlatformSettingsUpdate, actor: User) -> dict:
     audit.record(
         db, action="platform.settings_updated", entity_type="platform_settings", entity_id=_SETTINGS_ID,
         actor_user_id=actor.id, group_id=None,
-        before={"tier_thresholds": before["tier_thresholds"], "group_defaults": before["group_defaults"]},
-        after={"tier_thresholds": after["tier_thresholds"], "group_defaults": after["group_defaults"],
+        before={"star_thresholds": before["star_thresholds"], "group_defaults": before["group_defaults"]},
+        after={"star_thresholds": after["star_thresholds"], "group_defaults": after["group_defaults"],
                "recalculated_ratings": recalculated},
         reason=data.reason,
     )

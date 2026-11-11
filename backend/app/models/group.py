@@ -9,7 +9,7 @@ from app.models._types import str_enum
 
 
 def _default_draw_weights() -> dict:
-    return {"average": 0.40, "tier": 0.25, "attributes": 0.20, "skills": 0.15}
+    return {"average": 0.40, "stars": 0.25, "attributes": 0.20, "skills": 0.15}
 
 
 class FootballGroup(Base):
@@ -102,6 +102,19 @@ class GroupMember(Base):
     preferred_position: Mapped[Position] = mapped_column(str_enum(Position), default=Position.ANY)
     special_skill_id: Mapped[int | None] = mapped_column(ForeignKey("special_skills.id"), nullable=True)
     pending_skill_id: Mapped[int | None] = mapped_column(ForeignKey("special_skills.id"), nullable=True)
+    # quiz de autoavaliação: pedido a todo membro ativo até responder (inclusive quem já estava no grupo), exceto
+    # quem já tem perfil consolidado pelas avaliações (dispensado). Regras em app.services.level_quiz
+    self_assessment: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # respostas (índice por atributo)
+    self_assessed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    self_assessment_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)  # field | goalkeeper
+    quiz_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)  # nível calculado pelas respostas
+    declared_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)  # nível que o jogador diz ter
+    # nível confirmado (ou ajustado) por um administrador depois do quiz
+    confirmed_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    level_reviewed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # lembretes do quiz: último aviso (manual ou automático) e quantos automáticos já foram enviados
+    quiz_reminded_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    quiz_reminders_count: Mapped[int] = mapped_column(Integer, default=0)
     joined_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 

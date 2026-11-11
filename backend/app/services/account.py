@@ -67,6 +67,16 @@ def _group_export(db: Session, member: GroupMember) -> dict:
         "preferred_position": member.preferred_position,
         "special_skill": member.special_skill.name if member.special_skill else None,
         "joined_at": member.joined_at,
+        # quiz de nível: respostas e níveis (calculado, declarado e confirmado pelo administrador)
+        "self_assessment": {
+            "kind": member.self_assessment_kind,
+            "answered_at": member.self_assessed_at,
+            "answers": member.self_assessment,
+            "quiz_stars": member.quiz_stars,
+            "declared_stars": member.declared_stars,
+            "confirmed_stars": member.confirmed_stars,
+            "reviewed_at": member.level_reviewed_at,
+        } if member.self_assessed_at is not None else None,
         "ratings": [ratings.to_out(r) for r in db.scalars(
             select(PlayerRating).where(PlayerRating.member_id == member.id)
         ).all()],
@@ -77,7 +87,7 @@ def _group_export(db: Session, member: GroupMember) -> dict:
                 "date": h.created_at, "reason": h.reason, "match_id": h.match_id, "kind": h.kind,
                 "match_scores": h.match_scores, "evaluations_count": h.evaluations_count,
                 "average_before": h.average_before, "average_after": h.average_after,
-                "tier_before": h.tier_before, "tier_after": h.tier_after, "attributes_after": h.attributes_after,
+                "stars_before": h.stars_before, "stars_after": h.stars_after, "attributes_after": h.attributes_after,
             }
             for h in history
         ],
@@ -226,6 +236,7 @@ def delete_account(db: Session, user: User, *, password: str | None, confirm: st
         m.role = GroupRole.PLAYER
         m.nickname = None
         m.pending_skill_id = None
+        m.self_assessment = None  # respostas do quiz são dados pessoais; o nível fica (histórico do grupo)
         audit.record(db, action="member.account_deleted", entity_type="group_member", entity_id=m.id,
                      actor_user_id=user.id, group_id=m.group_id, before=before,
                      after=audit.snapshot(m, ["role", "status", "nickname"]))

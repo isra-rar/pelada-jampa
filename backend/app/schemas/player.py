@@ -1,11 +1,11 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.domain.enums import Position, RatingKind
 from app.schemas.common import ORMModel
-from app.schemas.group import SkillOut
+from app.schemas.group import MemberSelfAssessment, SkillOut
 from app.schemas.stats import PlayerGameStats
 
 
@@ -16,8 +16,8 @@ class RatingOut(BaseModel):
     labels: dict[str, str]
     average: float
     average_display: float
-    tier: str
-    tier_label: str
+    stars: int  # nível de 0 a 5 estrelas
+    stars_label: str
     is_provisional: bool
     valid_evaluations_count: int
     matches_evaluated_count: int
@@ -34,11 +34,51 @@ class RatingHistoryOut(ORMModel):
     match_scores: dict | None
     average_before: float | None
     average_after: float
-    tier_before: str | None
-    tier_after: str
+    stars_before: int | None
+    stars_after: int
     evaluations_count: int
     weight_applied: float
     created_at: datetime
+
+
+class SelfAssessmentQuestion(BaseModel):
+    attribute: str
+    label: str
+    question: str
+    hint: str
+    options: list[str]  # da mais fraca para a mais forte; a resposta é o índice
+
+
+class SelfAssessmentOut(MemberSelfAssessment):
+    pending: bool
+    answers: dict[str, int] | None
+    is_goalkeeper: bool  # posição atual no grupo (pré-seleciona "no gol")
+    star_labels: dict[str, str]  # "5" → "Craque"
+    questions: list[SelfAssessmentQuestion]  # quiz de linha
+    # quiz de goleiro; None quando o grupo avalia goleiros com os atributos de linha
+    goalkeeper_questions: list[SelfAssessmentQuestion] | None = None
+
+
+class SelfAssessmentIn(BaseModel):
+    kind: RatingKind = RatingKind.FIELD  # goalkeeper = respondeu as perguntas de goleiro
+    answers: dict[str, int]  # atributo → índice da opção escolhida (0 a 4)
+    declared_stars: int = Field(ge=0, le=5)  # nível que o jogador diz ter (contraponto ao quiz)
+
+
+class SelfAssessmentReminderOut(BaseModel):
+    reminded: int  # quantos jogadores foram avisados
+
+
+class SelfAssessmentResult(BaseModel):
+    applied: bool  # False quando o perfil já tinha avaliações ou nota definida pelo administrador
+    rating: RatingOut
+    self_assessment: MemberSelfAssessment
+
+
+class LevelReviewResult(BaseModel):
+    applied: bool  # False quando o perfil já foi consolidado pelas avaliações (nível não muda)
+    rating: RatingOut
+    self_assessment: MemberSelfAssessment
 
 
 class ProvisionalRatingIn(BaseModel):
@@ -54,11 +94,11 @@ class PlayerSummary(BaseModel):
     photo_url: str | None
     preferred_position: Position
     special_skill: SkillOut | None
-    tier: str
+    stars: int
     average: float
     average_display: float
     is_provisional: bool
-    goalkeeper_tier: str | None = None
+    goalkeeper_stars: int | None = None
     goalkeeper_average_display: float | None = None
 
 
@@ -83,7 +123,7 @@ class RatingExplanation(BaseModel):
     provisional_match_weight: float
     min_evaluators_full_weight: int
     min_evaluations_to_consolidate: int
-    tiers: dict[str, str]
+    stars: dict[str, str]
 
 
 class PlayerProfile(BaseModel):

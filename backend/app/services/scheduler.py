@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -60,14 +60,16 @@ def expire_waitlist_offers(db: Session) -> int:
     rows = db.execute(
         select(Match, FootballGroup)
         .join(FootballGroup, FootballGroup.id == Match.group_id)
-        .join(MatchPlayer, MatchPlayer.match_id == Match.id)
         .where(
             FootballGroup.suspended_at.is_(None),
             Match.status == MatchStatus.PUBLISHED,
             Match.starts_at > utcnow(),
-            MatchPlayer.promotion_offered_at.is_not(None),
+            # EXISTS em vez de JOIN + DISTINCT: o Postgres não compara colunas JSON (SELECT DISTINCT falha)
+            exists().where(
+                MatchPlayer.match_id == Match.id,
+                MatchPlayer.promotion_offered_at.is_not(None),
+            ),
         )
-        .distinct()
     ).all()
     total = 0
     for match, group in rows:

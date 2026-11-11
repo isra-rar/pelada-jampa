@@ -503,7 +503,46 @@ class VenueDashboardOut(BaseModel):
     rent_overdue_total: Decimal  # tudo que está pendente, de qualquer período
     active_groups: int
     pending_requests: int
+    pending_bookings: int = 0  # horários pedidos por grupos sem vínculo, aguardando o dono
     courts: list[CourtOccupancy]
     at_risk: list[AtRiskMatch]  # próximos 7 dias com menos da metade das vagas confirmadas
     overdue_groups: list[OverdueGroup]
     groups: list[GroupActivity]
+
+
+# ------------------------------------------------------------------ métricas por espaço (Super-Admin)
+
+
+class VenueMetricsRow(BaseModel):
+    venue_id: int
+    name: str
+    is_active: bool
+    owners: list[str]
+    courts: int
+    occupancy_rate: float | None
+    booked_hours: float
+    matches_held: int
+    matches_cancelled: int
+    matches_upcoming: int
+    players: int  # jogadores diferentes que confirmaram ou jogaram nas peladas realizadas
+    active_groups: int
+    pending_bookings: int
+    rent_expected: Decimal
+    rent_received: Decimal
+    rent_pending: Decimal
+    rent_overdue_total: Decimal  # tudo que está pendente, de qualquer período
+
+
+class VenuesMetricsOut(BaseModel):
+    since: date
+    until: date
+    venues: int
+    active_venues: int
+    matches_held: int
+    matches_cancelled: int
+    players: int  # soma por espaço (quem joga em dois espaços conta nos dois)
+    occupancy_rate: float | None
+    rent_expected: Decimal
+    rent_received: Decimal
+    rent_overdue_total: Decimal
+    items: list[VenueMetricsRow]  # maior receita primeiro

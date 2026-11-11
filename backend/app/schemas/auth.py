@@ -37,6 +37,13 @@ class UserOut(ORMModel):
     created_at: datetime
 
 
+class AdminUserOut(UserOut):
+    """Conta vista pela gestão, com os papéis: dono (DE) de quais espaços e administrador de quais peladas."""
+
+    venues_owned: list[str] = []
+    groups_admin: list[str] = []
+
+
 class UserUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=120)
     phone: str | None = Field(default=None, max_length=30)

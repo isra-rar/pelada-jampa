@@ -21,8 +21,21 @@ from app.domain.enums import (
     NotificationType,
     RentStatus,
     VenueLinkStatus,
+    VenueRole,
 )
-from app.models import Court, CourtBlock, FootballGroup, Match, MatchPlayer, RentCharge, User, Venue, VenueGroup
+from app.models import (
+    Court,
+    CourtBlock,
+    FootballGroup,
+    GroupMember,
+    Match,
+    MatchPlayer,
+    RentCharge,
+    User,
+    Venue,
+    VenueGroup,
+    VenueStaff,
+)
 from app.schemas.venue import RentChargeUpdate
 from app.services import audit, notifications
 from app.services.stats import BR_TZ
@@ -546,6 +559,63 @@ def dashboard(db: Session, venue: Venue, since: date | None, until: date | None)
         "rent_overdue_total": sum((g["pending_amount"] for g in overdue_groups), Decimal("0")),
         "active_groups": links.get(VenueLinkStatus.ACTIVE, 0),
         "pending_requests": links.get(VenueLinkStatus.PENDING, 0),
+        "pending_bookings": db.scalar(select(func.count()).select_from(Match).where(
+            Match.court_id.in_(all_court_ids), Match.booking_status == BookingStatus.PENDING,
+            Match.status != MatchStatus.CANCELLED, Match.ends_at > now)) or 0 if all_court_ids else 0,
         "courts": court_rows, "at_risk": at_risk, "overdue_groups": overdue_groups,
         "groups": sorted(activity.values(), key=lambda a: (-a["matches_held"], a["group_name"])),
+    }
+
+
+# ------------------------------------------------------------------ gestão (Super-Admin)
+
+
+def venues_metrics(db: Session, since: date | None, until: date | None) -> dict:
+    """Métricas de cada espaço no período (Super-Admin): peladas, ocupação, aluguel, jogadores e grupos, com os
+    totais da plataforma. Mesmo cálculo do painel do dono."""
+    rows = []
+    now = utcnow()
+    for venue in db.scalars(select(Venue).order_by(Venue.name)).all():
+        d = dashboard(db, venue, since, until)
+        start, end = _local_range(d["since"], d["until"])
+        court_ids = [c.id for c in courts_of(db, venue.id)]
+        players = db.scalar(
+            select(func.count(func.distinct(GroupMember.user_id)))
+            .select_from(MatchPlayer)
+            .join(GroupMember, GroupMember.id == MatchPlayer.member_id)
+            .join(Match, Match.id == MatchPlayer.match_id)
+            .where(Match.court_id.in_(court_ids), Match.status.in_(_HELD), Match.starts_at >= start,
+                   Match.starts_at < min(end, now), MatchPlayer.is_referee.is_(False),
+                   MatchPlayer.status.in_((AttendanceStatus.CONFIRMED, AttendanceStatus.PRESENT)))
+        ) or 0 if court_ids else 0
+        owners = db.scalars(
+            select(User.name).join(VenueStaff, VenueStaff.user_id == User.id)
+            .where(VenueStaff.venue_id == venue.id, VenueStaff.role == VenueRole.OWNER,
+                   VenueStaff.is_active.is_(True))
+        ).all()
+        rows.append({
+            "venue_id": venue.id, "name": venue.name, "is_active": venue.is_active, "owners": list(owners),
+            "courts": len(d["courts"]), "occupancy_rate": d["occupancy_rate"], "booked_hours": d["booked_hours"],
+            "matches_held": d["matches_held"], "matches_cancelled": d["matches_cancelled"],
+            "matches_upcoming": d["matches_upcoming"], "players": players,
+            "active_groups": d["active_groups"], "pending_bookings": d["pending_bookings"],
+            "rent_expected": d["rent_expected"], "rent_received": d["rent_received"],
+            "rent_pending": d["rent_pending"], "rent_overdue_total": d["rent_overdue_total"],
+        })
+        since, until = d["since"], d["until"]
+    zero = Decimal("0")
+    if since is None or until is None:  # nenhum espaço cadastrado
+        _, since, until = _month_bounds(None)
+    open_hours = sum(r["booked_hours"] / r["occupancy_rate"] for r in rows if r["occupancy_rate"])
+    return {
+        "since": since, "until": until,
+        "venues": len(rows), "active_venues": sum(1 for r in rows if r["is_active"]),
+        "matches_held": sum(r["matches_held"] for r in rows),
+        "matches_cancelled": sum(r["matches_cancelled"] for r in rows),
+        "players": sum(r["players"] for r in rows),
+        "occupancy_rate": _rate(sum(r["booked_hours"] for r in rows if r["occupancy_rate"]), open_hours),
+        "rent_expected": sum((r["rent_expected"] for r in rows), zero),
+        "rent_received": sum((r["rent_received"] for r in rows), zero),
+        "rent_overdue_total": sum((r["rent_overdue_total"] for r in rows), zero),
+        "items": sorted(rows, key=lambda r: (-r["rent_expected"], -r["matches_held"], r["name"])),
     }

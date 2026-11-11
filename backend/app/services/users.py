@@ -52,6 +52,15 @@ def authenticate(db: Session, email: str, password: str) -> User:
     return user
 
 
+# convidados dos membros têm um registro de usuário só para o histórico (sem conta): e-mail neste domínio reservado
+GUEST_EMAIL_DOMAIN = "convidado.invalid"
+
+
+def real_users():
+    """Filtro de contas de verdade (exclui os registros dos convidados)."""
+    return ~User.email.endswith("@" + GUEST_EMAIL_DOMAIN)
+
+
 def get_or_create_placeholder(db: Session, email: str, name: str) -> User:
     user = get_by_email(db, email)
     if user is None:

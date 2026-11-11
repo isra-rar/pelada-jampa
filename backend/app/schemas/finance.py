@@ -14,6 +14,9 @@ class PaymentOut(BaseModel):
     match_date: datetime
     member_id: int
     player_name: str
+    # convidado: quem paga é o membro que trouxe
+    payer_member_id: int | None = None
+    payer_name: str | None = None
     amount_due: Decimal
     amount_paid: Decimal
     outstanding: Decimal

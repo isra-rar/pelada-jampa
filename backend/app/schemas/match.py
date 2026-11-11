@@ -10,6 +10,18 @@ from app.schemas.common import ORMModel
 EvaluationWindow = Literal[6, 24]
 
 
+def check_expansion(waitlist_limit, expand: bool, num_teams, expanded_num_teams) -> None:
+    """Aumento da pelada quando a espera lota: precisa do tamanho da espera e dos times depois de aumentar."""
+    if not expand:
+        return
+    if not waitlist_limit:
+        raise ValueError("Para aumentar a pelada quando a espera lotar, informe o tamanho da lista de espera")
+    if not expanded_num_teams:
+        raise ValueError("Informe quantos times a pelada terá depois de aumentar")
+    if num_teams and expanded_num_teams <= num_teams:
+        raise ValueError("Depois de aumentar, a pelada precisa ter mais times do que antes")
+
+
 class _MatchBase(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
@@ -29,6 +41,12 @@ class _MatchBase(BaseModel):
     field_players_per_team: int = Field(ge=1, le=20)
     goalkeepers_per_team: int = Field(default=1, ge=0, le=2)
     referee_slots: int = Field(default=0, ge=0, le=2, description="Vagas de juiz (fora das vagas de jogador)")
+    num_teams: int | None = Field(default=None, ge=2, le=8, description="Times previstos (padrão do sorteio)")
+    waitlist_limit: int | None = Field(default=None, ge=1, le=100, description="Tamanho máximo da espera")
+    expand_when_waitlist_full: bool = Field(
+        default=False, description="Quando a espera lota, a pelada aumenta uma vez: vagas + espera"
+    )
+    expanded_num_teams: int | None = Field(default=None, ge=2, le=16, description="Times depois de aumentar")
     evaluation_window_hours: EvaluationWindow = 24
     responsible_admin_ids: list[int] = Field(default_factory=list)
 
@@ -36,6 +54,7 @@ class _MatchBase(BaseModel):
     def _place(self):
         if not self.location and self.court_id is None:
             raise ValueError("Informe o local ou a quadra")
+        check_expansion(self.waitlist_limit, self.expand_when_waitlist_full, self.num_teams, self.expanded_num_teams)
         return self
 
 
@@ -71,6 +90,10 @@ class MatchUpdate(BaseModel):
     field_players_per_team: int | None = Field(default=None, ge=1, le=20)
     goalkeepers_per_team: int | None = Field(default=None, ge=0, le=2)
     referee_slots: int | None = Field(default=None, ge=0, le=2)
+    num_teams: int | None = Field(default=None, ge=2, le=8)
+    waitlist_limit: int | None = Field(default=None, ge=1, le=100)
+    expand_when_waitlist_full: bool | None = None
+    expanded_num_teams: int | None = Field(default=None, ge=2, le=16)
     confirmation_deadline: datetime | None = None
     cancellation_deadline: datetime | None = None
     evaluation_window_hours: EvaluationWindow | None = None
@@ -115,10 +138,15 @@ class MatchOut(ORMModel):
     field_players_per_team: int
     goalkeepers_per_team: int
     referee_slots: int = 0
+    num_teams: int | None = None
+    waitlist_limit: int | None = None
+    expand_when_waitlist_full: bool = False
+    expanded_num_teams: int | None = None
     confirmation_deadline: datetime
     cancellation_deadline: datetime | None
     evaluation_window_hours: int
     waitlist_auto_promote: bool
+    expanded_at: datetime | None = None  # quando a espera lotou e a pelada aumentou
     responsible_admin_ids: list[int]
     status: MatchStatus
     ended_at: datetime | None
@@ -172,6 +200,10 @@ class SeriesUpdate(BaseModel):
     field_players_per_team: int | None = Field(default=None, ge=1, le=20)
     goalkeepers_per_team: int | None = Field(default=None, ge=0, le=2)
     referee_slots: int | None = Field(default=None, ge=0, le=2)
+    num_teams: int | None = Field(default=None, ge=2, le=8)
+    waitlist_limit: int | None = Field(default=None, ge=1, le=100)
+    expand_when_waitlist_full: bool | None = None
+    expanded_num_teams: int | None = Field(default=None, ge=2, le=16)
     confirmation_deadline_hours: int | None = Field(default=None, ge=0)
     cancellation_deadline_hours: int | None = Field(default=None, ge=0)
     evaluation_window_hours: EvaluationWindow | None = None
@@ -199,6 +231,10 @@ class SeriesOut(ORMModel):
     field_players_per_team: int
     goalkeepers_per_team: int
     referee_slots: int = 0
+    num_teams: int | None = None
+    waitlist_limit: int | None = None
+    expand_when_waitlist_full: bool = False
+    expanded_num_teams: int | None = None
     confirmation_deadline_hours: int
     cancellation_deadline_hours: int | None
     evaluation_window_hours: int
@@ -224,6 +260,9 @@ class MatchPlayerOut(BaseModel):
     is_goalkeeper: bool
     is_referee: bool = False
     hired: bool = False  # goleiro/juiz contratado pelo comércio
+    # convidado de um membro (sem conta própria): quem trouxe, que responde pela cobrança
+    invited_by_member_id: int | None = None
+    invited_by_name: str | None = None
     confirmed_at: datetime | None
     waitlist_position: int | None
     promotion_offered_at: datetime | None
@@ -242,6 +281,7 @@ class DebtOut(BaseModel):
     amount_paid: Decimal
     outstanding: Decimal
     status: str
+    guest_name: str | None = None  # cobrança de um convidado seu
 
 
 class ConfirmIn(BaseModel):

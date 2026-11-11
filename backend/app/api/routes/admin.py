@@ -24,13 +24,14 @@ from app.schemas.platform import PlatformSettingsOut, PlatformSettingsUpdate
 from app.services import admin_groups, audit, metrics, platform
 from app.services import draw_calibration as draw_calibration_service
 from app.services.access import get_group, get_member_in_group
+from app.services.users import real_users
 
 router = APIRouter(prefix="/admin", tags=["Administração da plataforma"])
 
 
 @router.get("/users", response_model=Page[UserOut])
 def list_users(admin: PlatformAdmin, db: DB, paging: Paging, search: str | None = None):
-    stmt = select(User)
+    stmt = select(User).where(real_users())  # convidados dos membros não são contas
     if search:
         like = f"%{search.lower()}%"
         stmt = stmt.where(or_(func.lower(User.name).like(like), func.lower(User.email).like(like)))

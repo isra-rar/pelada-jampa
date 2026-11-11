@@ -15,7 +15,7 @@
 from collections.abc import Iterable
 from datetime import timedelta
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
@@ -118,17 +118,22 @@ def counts(db: Session, group_id: int) -> dict[str, int]:
         select(func.count()).select_from(GroupMember)
         .where(*active, GroupMember.self_assessed_at.is_(None), ~consolidated)
     ) or 0
+    member_or_guest = or_(
+        GroupMember.status == MemberStatus.ACTIVE,
+        (GroupMember.status == MemberStatus.GUEST) & GroupMember.invited_by_member_id.is_not(None),
+    )
     to_review = db.scalar(
         select(func.count()).select_from(GroupMember)
-        .where(*active, GroupMember.self_assessed_at.is_not(None), GroupMember.level_reviewed_at.is_(None))
+        .where(GroupMember.group_id == group_id, member_or_guest, GroupMember.self_assessed_at.is_not(None),
+               GroupMember.level_reviewed_at.is_(None))
     ) or 0
     return {"quiz_not_answered": not_answered, "levels_to_review": to_review}
 
 
 def unconfirmed_count(db: Session, members: list[GroupMember]) -> int:
-    """Quantos destes membros ainda não têm o nível confirmado (sem quiz ou aguardando o admin). Contratados e
-    perfis já consolidados pelas avaliações não contam."""
-    members = [m for m in members if m.status == MemberStatus.ACTIVE]
+    """Quantos destes jogadores ainda não têm o nível confirmado (sem quiz ou aguardando o admin), incluindo
+    convidados. Contratados e perfis já consolidados pelas avaliações não contam."""
+    members = [m for m in members if m.status == MemberStatus.ACTIVE or m.is_invited_guest]
     data = info_bulk(db, members)
     return sum(1 for m in members if data[m.id]["status"] in ("not_answered", "to_review"))
 
@@ -173,7 +178,7 @@ def _set_by_admin(db: Session, rating: PlayerRating) -> bool:
     ) is not None
 
 
-def _active_admin_ids(db: Session, group_id: int) -> list[int]:
+def active_admin_ids(db: Session, group_id: int) -> list[int]:
     return list(db.scalars(
         select(GroupMember.user_id).where(
             GroupMember.group_id == group_id,
@@ -256,7 +261,7 @@ def submit(
         ratings.record_history(db, rating, reason="self_assessment", before=before, avg_before=avg_before,
                                stars_before=stars_before, actor_user_id=member.user_id)
 
-    other_admins = [uid for uid in _active_admin_ids(db, group.id) if uid != member.user_id]
+    other_admins = [uid for uid in active_admin_ids(db, group.id) if uid != member.user_id]
     auto_confirmed = member.is_admin and not other_admins
     if auto_confirmed:
         # único administrador: não há quem confirme, então o nível que ele declarou vale
@@ -293,7 +298,7 @@ def review(
         raise BusinessRuleError("O jogador ainda não respondeu o quiz deste grupo", code="self_assessment_missing")
     if not 0 <= stars <= R.MAX_STARS:
         raise BusinessRuleError("Escolha um nível de 0 a 5 estrelas", code="invalid_stars")
-    if member.user_id == actor.id and any(uid != actor.id for uid in _active_admin_ids(db, group.id)):
+    if member.user_id == actor.id and any(uid != actor.id for uid in active_admin_ids(db, group.id)):
         raise BusinessRuleError("Outro administrador do grupo precisa confirmar o seu nível",
                                 code="self_review_not_allowed")
     before = {"confirmed_stars": member.confirmed_stars}

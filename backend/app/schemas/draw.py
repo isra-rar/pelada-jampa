@@ -6,7 +6,7 @@ from app.domain.enums import DrawStatus
 
 
 class DrawCreate(BaseModel):
-    num_teams: int = Field(default=2, ge=2, le=8)
+    num_teams: int | None = Field(default=None, ge=2, le=8)  # padrão: times previstos da pelada (ou 2)
     field_players_per_team: int | None = Field(default=None, ge=1, le=20)
     goalkeepers_per_team: int | None = Field(default=None, ge=0, le=2)
     eligible_member_ids: list[int] | None = None  # padrão: confirmados (ou presentes)

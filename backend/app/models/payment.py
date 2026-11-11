@@ -29,8 +29,18 @@ class Payment(Base):
     notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
     reported_paid_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)  # jogador informou
     last_reminder_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)  # lembrete periódico
+    # quem paga, quando não é o próprio jogador (convidado: quem trouxe). Nulo = o próprio `member_id`
+    payer_member_id: Mapped[int | None] = mapped_column(
+        ForeignKey("group_members.id", name="fk_payments_payer_member"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     match = relationship("Match", lazy="joined")
-    member = relationship("GroupMember", lazy="joined")
+    member = relationship("GroupMember", foreign_keys=[member_id], lazy="joined")
+    payer = relationship("GroupMember", foreign_keys=[payer_member_id], lazy="select")
+
+    @property
+    def payer_id(self) -> int:
+        """Membro responsável pelo pagamento (o próprio jogador ou, para convidado, quem trouxe)."""
+        return self.payer_member_id or self.member_id

@@ -87,6 +87,20 @@ python scripts/make_platform_admin.py voce@exemplo.com            # --remover ti
     `self_estimate` compara o nível declarado com o atual (`over | under | accurate`).
   - O painel do admin conta quem não respondeu e quantos níveis aguardam; os admins são avisados a cada quiz
     respondido. As respostas entram na exportação de dados (LGPD) e são apagadas na exclusão da conta.
+- **Convidados** (`app/services/guests.py`; `/groups/{id}/guests`, `/matches/{id}/guests`): qualquer membro
+  cadastra um convidado (jogador sem conta) no grupo, sem precisar de pelada, e diz quantas estrelas acha que ele
+  tem. O nível vale desde já; se quem convidou não é admin, entra na fila de confirmação do quiz de nível. O
+  convidado é um membro `guest` com `invited_by_member_id`: não acessa o grupo, não entra no ranking nem avalia
+  (mas é avaliado), e os avisos dele vão para quem trouxe. Quem trouxe (ou um admin) coloca o convidado nas
+  peladas; ele ocupa vaga ou entra na espera (promoção automática). A cobrança fica no nome do convidado com
+  `payer_member_id` = quem trouxe, que vê o lançamento, recebe lembretes e pode avisar "Já paguei". O usuário
+  interno do convidado usa o domínio reservado `convidado.invalid` e fica fora das métricas e da lista de contas.
+- **Lista de espera limitada e pelada que aumenta**: `num_teams` (times previstos, padrão do sorteio),
+  `waitlist_limit` (espera cheia recusa novas confirmações com `waitlist_full`) e, com
+  `expand_when_waitlist_full`, quando a espera lota a pelada aumenta uma vez: vagas + espera e
+  `expanded_num_teams` times (ex.: 15 + 5 na espera vira 20 em 4 times), quem esperava é confirmado e todos são
+  avisados (`expanded_at`). Depois disso a espera volta a valer com o mesmo limite, sem novo aumento. As
+  peladas recorrentes copiam essas regras.
 - **Avaliação pós-jogo** com janela, antimanipulação e consolidação.
 - **Financeiro** (só controle: o pagamento é feito por fora do app): cobrança por pelada, quitação em lote,
   pendências, isenção/estorno; regras opcionais de cobrança para quem falta sem avisar ou desiste fora do prazo;

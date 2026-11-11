@@ -19,6 +19,7 @@ from app.domain.enums import DrawStatus, EvaluationStatus, MatchStatus, PaymentS
 from app.models import Draw, Evaluation, FootballGroup, GroupMember, Match, MatchPlayer, Payment, User
 from app.services.payments import outstanding
 from app.services.stats import BR_TZ, local_bounds
+from app.services.users import real_users
 
 GROUP_DEFAULT_DAYS = 90
 PLATFORM_DEFAULT_DAYS = 30
@@ -209,11 +210,11 @@ def platform_metrics(db: Session, since: date | None, until: date | None) -> dic
     return {
         "since": since,
         "until": until,
-        "users_total": count(select(func.count()).select_from(User).where(User.deleted_at.is_(None))),
+        "users_total": count(select(func.count()).select_from(User).where(User.deleted_at.is_(None), real_users())),
         "users_active": count(select(func.count()).select_from(User).where(User.deleted_at.is_(None),
-                                                                           User.is_active.is_(True))),
+                                                                           User.is_active.is_(True), real_users())),
         "users_new": count(select(func.count()).select_from(User).where(User.created_at >= start,
-                                                                        User.created_at < end)),
+                                                                        User.created_at < end, real_users())),
         "users_deleted": count(select(func.count()).select_from(User).where(User.deleted_at >= start,
                                                                             User.deleted_at < end)),
         "groups_total": count(select(func.count()).select_from(FootballGroup)),

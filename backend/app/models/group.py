@@ -102,6 +102,10 @@ class GroupMember(Base):
     preferred_position: Mapped[Position] = mapped_column(str_enum(Position), default=Position.ANY)
     special_skill_id: Mapped[int | None] = mapped_column(ForeignKey("special_skills.id"), nullable=True)
     pending_skill_id: Mapped[int | None] = mapped_column(ForeignKey("special_skills.id"), nullable=True)
+    # convidado (status GUEST, sem conta própria): membro que trouxe; a cobrança das peladas vai para ele
+    invited_by_member_id: Mapped[int | None] = mapped_column(
+        ForeignKey("group_members.id", name="fk_group_members_invited_by"), nullable=True, index=True
+    )
     # quiz de autoavaliação: pedido a todo membro ativo até responder (inclusive quem já estava no grupo), exceto
     # quem já tem perfil consolidado pelas avaliações (dispensado). Regras em app.services.level_quiz
     self_assessment: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # respostas (índice por atributo)
@@ -121,6 +125,12 @@ class GroupMember(Base):
     user = relationship("User", lazy="joined")
     special_skill = relationship("SpecialSkill", foreign_keys=[special_skill_id], lazy="joined")
     pending_skill = relationship("SpecialSkill", foreign_keys=[pending_skill_id], lazy="joined")
+    invited_by = relationship("GroupMember", remote_side=[id], foreign_keys=[invited_by_member_id], lazy="select")
+
+    @property
+    def is_invited_guest(self) -> bool:
+        """Convidado de um membro (sem conta própria), diferente do goleiro/juiz contratado."""
+        return self.invited_by_member_id is not None
 
     @property
     def is_admin(self) -> bool:

@@ -90,6 +90,7 @@ def create_draw(db: Session, group: FootballGroup, match: Match, data: DrawCreat
     eligible = _eligible(db, match, data)
     gk_per_team = data.goalkeepers_per_team if data.goalkeepers_per_team is not None else match.goalkeepers_per_team
     field_per_team = data.field_players_per_team or match.field_players_per_team
+    num_teams = data.num_teams or match.num_teams or 2
 
     snapshots = {
         mp.member_id: _snapshot_player(db, group, mp, as_goalkeeper=mp.is_goalkeeper and gk_per_team > 0)
@@ -101,7 +102,7 @@ def create_draw(db: Session, group: FootballGroup, match: Match, data: DrawCreat
     previous = db.scalars(select(Draw).where(Draw.match_id == match.id)).all()
     weights = {**group.draw_weights, **(data.weights or {})}
     config = D.DrawConfig(
-        num_teams=data.num_teams,
+        num_teams=num_teams,
         field_per_team=field_per_team,
         goalkeepers_per_team=gk_per_team,
         weights=weights,
@@ -126,7 +127,7 @@ def create_draw(db: Session, group: FootballGroup, match: Match, data: DrawCreat
         sequence=sequence,
         status=DrawStatus.DRAFT,
         params={
-            "num_teams": data.num_teams,
+            "num_teams": num_teams,
             "field_players_per_team": field_per_team,
             "goalkeepers_per_team": gk_per_team,
             "weights": weights,

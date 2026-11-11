@@ -18,6 +18,7 @@ from app.api.routes import (
     evaluations,
     finance,
     groups,
+    guests,
     matches,
     notifications,
     pros,
@@ -77,10 +78,11 @@ def create_app() -> FastAPI:
         expose_headers=["Content-Disposition"],  # nome do arquivo nas exportações (CSV)
     )
     register_error_handlers(app)
-    group_scoped = {groups, matches, evaluations, finance, draws, stats, venues, pros}  # grupo suspenso: só leitura
+    # grupo suspenso: só leitura
+    group_scoped = {groups, guests, matches, evaluations, finance, draws, stats, venues, pros}
     for module in (
-        auth, groups, matches, evaluations, finance, draws, stats, venues, discover, pros, notifications, push,
-        admin,
+        auth, groups, guests, matches, evaluations, finance, draws, stats, venues, discover, pros, notifications,
+        push, admin,
     ):
         guard = [Depends(block_writes_in_suspended_group)] if module in group_scoped else []
         app.include_router(module.router, prefix=API_PREFIX, dependencies=guard)

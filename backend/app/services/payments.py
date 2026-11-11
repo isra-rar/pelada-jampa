@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,10 @@ from app.services.groups import group_admin_user_ids
 
 ZERO = Decimal("0.00")
 _AUDIT_FIELDS = ["amount_due", "amount_paid", "status", "due_date", "paid_at", "method", "confirmed_by_id", "notes"]
+
+
+# quem responde pelo lançamento: o próprio jogador ou, para convidado, quem trouxe
+PAYER = func.coalesce(Payment.payer_member_id, Payment.member_id)
 
 
 def outstanding(p: Payment) -> Decimal:
@@ -36,6 +40,8 @@ def payment_out(p: Payment) -> dict:
         "match_date": p.match.starts_at,
         "member_id": p.member_id,
         "player_name": p.member.display_name,
+        "payer_member_id": p.payer_member_id,
+        "payer_name": p.payer.display_name if p.payer_member_id else None,
         "amount_due": p.amount_due,
         "amount_paid": p.amount_paid,
         "outstanding": outstanding(p),
@@ -61,6 +67,8 @@ def debt_out(p: Payment) -> dict:
         "amount_paid": p.amount_paid,
         "outstanding": outstanding(p),
         "status": p.status.value,
+        # cobrança de um convidado (quem paga é quem trouxe)
+        "guest_name": p.member.display_name if p.payer_member_id else None,
     }
 
 
@@ -77,7 +85,7 @@ def get_payment(db: Session, group_id: int, payment_id: int, *, lock: bool = Fal
 
 def pending_debts(db: Session, group_id: int, member_id: int, exclude_match_id: int | None = None) -> list[Payment]:
     stmt = select(Payment).join(Match, Match.id == Payment.match_id).where(
-        Payment.group_id == group_id, Payment.member_id == member_id, Payment.status == PaymentStatus.PENDING
+        Payment.group_id == group_id, PAYER == member_id, Payment.status == PaymentStatus.PENDING
     )
     if exclude_match_id is not None:
         stmt = stmt.where(Payment.match_id != exclude_match_id)
@@ -87,9 +95,9 @@ def pending_debts(db: Session, group_id: int, member_id: int, exclude_match_id: 
 def members_with_debt(db: Session, group_id: int, member_ids: list[int], exclude_match_id: int | None) -> set[int]:
     if not member_ids:
         return set()
-    stmt = select(Payment.member_id).where(
+    stmt = select(PAYER).where(
         Payment.group_id == group_id,
-        Payment.member_id.in_(member_ids),
+        PAYER.in_(member_ids),
         Payment.status == PaymentStatus.PENDING,
     )
     if exclude_match_id is not None:
@@ -112,7 +120,8 @@ def payments_stmt(
     if match_id is not None:
         stmt = stmt.where(Payment.match_id == match_id)
     if member_id is not None:
-        stmt = stmt.where(Payment.member_id == member_id)
+        # do jogador e dos convidados dele
+        stmt = stmt.where(or_(Payment.member_id == member_id, Payment.payer_member_id == member_id))
     if status is not None:
         stmt = stmt.where(Payment.status == status)
     return stmt
@@ -141,10 +150,12 @@ def ensure_charge(db: Session, match: Match, member_id: int, amount: Decimal | N
     existing = db.scalar(select(Payment).where(Payment.match_id == match.id, Payment.member_id == member_id))
     if existing is not None:
         return existing, False
+    member = db.get(GroupMember, member_id)
     p = Payment(
         group_id=match.group_id,
         match_id=match.id,
         member_id=member_id,
+        payer_member_id=member.invited_by_member_id if member is not None else None,
         amount_due=amount if amount is not None else match.price,
         amount_paid=ZERO,
         status=PaymentStatus.PENDING,
@@ -281,7 +292,7 @@ def summary(db: Session, group_id: int, match_id: int | None = None) -> dict:
         received += Decimal(p.amount_paid)
         if p.status == PaymentStatus.PENDING:
             pending += outstanding(p)
-            debtors.add(p.member_id)
+            debtors.add(p.payer_id)
     return {
         "group_id": group_id,
         "match_id": match_id,
@@ -305,9 +316,10 @@ def debtors(db: Session, group_id: int) -> list[dict]:
         amount = outstanding(p)
         if amount <= 0:
             continue
+        payer = p.payer if p.payer_member_id else p.member
         entry = by_member.setdefault(
-            p.member_id,
-            {"member_id": p.member_id, "name": p.member.display_name, "pending_count": 0, "outstanding": ZERO,
+            p.payer_id,
+            {"member_id": p.payer_id, "name": payer.display_name, "pending_count": 0, "outstanding": ZERO,
              "oldest_match_date": p.match.starts_at},
         )
         entry["pending_count"] += 1
@@ -317,7 +329,7 @@ def debtors(db: Session, group_id: int) -> list[dict]:
 
 
 def member_finance(db: Session, group_id: int, member_id: int) -> dict:
-    rows = db.scalars(select(Payment).where(Payment.group_id == group_id, Payment.member_id == member_id)).unique().all()
+    rows = db.scalars(select(Payment).where(Payment.group_id == group_id, PAYER == member_id)).unique().all()
     pending = [p for p in rows if p.status == PaymentStatus.PENDING]
     return {
         "pending_count": len(pending),
@@ -333,8 +345,8 @@ def report_paid(db: Session, group: FootballGroup, payment_id: int, member: Grou
     """O jogador avisa que pagou (o pagamento é feito por fora do app). Só o administrador confirma o
     recebimento."""
     p = get_payment(db, group.id, payment_id, lock=True)
-    if p.member_id != member.id:
-        raise Forbidden("Você só pode informar seus próprios pagamentos")
+    if p.payer_id != member.id:
+        raise Forbidden("Você só pode informar seus próprios pagamentos (e os dos seus convidados)")
     if p.status != PaymentStatus.PENDING:
         raise BusinessRuleError("Este lançamento não está pendente", code="not_pending")
     if p.reported_paid_at is None:
@@ -375,7 +387,7 @@ def send_debt_reminders(db: Session) -> int:
         select(Payment, FootballGroup)
         .join(FootballGroup, FootballGroup.id == Payment.group_id)
         .join(Match, Match.id == Payment.match_id)
-        .join(GroupMember, GroupMember.id == Payment.member_id)
+        .join(GroupMember, GroupMember.id == PAYER)
         .join(User, User.id == GroupMember.user_id)
         .where(
             Payment.status == PaymentStatus.PENDING,
@@ -392,7 +404,7 @@ def send_debt_reminders(db: Session) -> int:
     by_member: dict[tuple[int, int], list[Payment]] = defaultdict(list)
     groups: dict[int, FootballGroup] = {}
     for p, g in rows:
-        by_member[(g.id, p.member_id)].append(p)
+        by_member[(g.id, p.payer_id)].append(p)
         groups[g.id] = g
 
     reminded = 0
@@ -405,7 +417,8 @@ def send_debt_reminders(db: Session) -> int:
         oldest = min(p.match.starts_at for p in items).astimezone(_BRASILIA).strftime("%d/%m")
         count = f"{len(items)} pendência" + ("s" if len(items) > 1 else "")
         notifications.notify(
-            db, [items[0].member.user_id], NotificationType.PAYMENT_PENDING, "Lembrete: pagamento pendente",
+            db, [(items[0].payer or items[0].member).user_id], NotificationType.PAYMENT_PENDING,
+            "Lembrete: pagamento pendente",
             f"Você tem {count} em {group.name} somando R$ {total:.2f} (a mais antiga é de {oldest}). "
             "O pagamento é feito direto com o organizador; depois toque em \"Já paguei\" no Financeiro.",
             group_id=group.id,

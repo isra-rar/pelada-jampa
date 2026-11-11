@@ -65,6 +65,48 @@ def _enter_waitlist(db: Session, match: Match, mp: MatchPlayer) -> None:
     mp.promotion_offered_at = None
 
 
+def notify_user_id(member: GroupMember) -> int:
+    """Quem recebe os avisos do jogador: o próprio ou, para convidado (sem conta), quem trouxe."""
+    if member.is_invited_guest and member.invited_by is not None:
+        return member.invited_by.user_id
+    return member.user_id
+
+
+def waitlist_full(db: Session, match: Match) -> bool:
+    return match.waitlist_limit is not None and len(waitlist(db, match)) >= match.waitlist_limit
+
+
+def maybe_expand(db: Session, group: FootballGroup, match: Match) -> bool:
+    """Aumenta a pelada uma única vez quando a lista de espera lota: as vagas crescem do tamanho da espera, os
+    times previstos passam a `expanded_num_teams` e quem esperava é promovido. Não faz commit."""
+    if not match.expand_when_waitlist_full or match.expanded_at is not None or not match.waitlist_limit:
+        return False
+    if match.status != MatchStatus.PUBLISHED or _now() >= match.starts_at:
+        return False
+    db.flush()
+    if len(waitlist(db, match)) < match.waitlist_limit:
+        return False
+    before = {"slots": match.slots, "num_teams": match.num_teams}
+    match.slots += match.waitlist_limit
+    match.num_teams = match.expanded_num_teams
+    match.expanded_at = _now()
+    audit.record(db, action="match.expanded", entity_type="match", entity_id=match.id, actor_user_id=None,
+                 group_id=group.id, before=before, after={"slots": match.slots, "num_teams": match.num_teams})
+    promoted = {mp.member_id for mp in promote_waitlist(db, match)}
+    confirmed = db.scalars(
+        select(MatchPlayer).where(MatchPlayer.match_id == match.id, MatchPlayer.status == S.CONFIRMED)
+    ).all()
+    targets = {notify_user_id(mp.member) for mp in confirmed if mp.member_id not in promoted}
+    targets |= set(group_admin_user_ids(db, group.id))
+    teams = f" e {match.num_teams} times" if match.num_teams else ""
+    notifications.notify(
+        db, sorted(targets), NotificationType.CONFIRMATION_REGISTERED, f"A pelada aumentou: {match.name}",
+        f"A lista de espera lotou e a pelada passou para {match.slots} jogadores{teams}.",
+        group_id=group.id, match_id=match.id,
+    )
+    return True
+
+
 def _occupied(db: Session, match: Match) -> int:
     """Vagas de jogador ocupadas (juízes têm vaga própria e não contam)."""
     rows = db.scalars(
@@ -115,6 +157,8 @@ def participation_out(
         "is_goalkeeper": mp.is_goalkeeper,
         "is_referee": mp.is_referee,
         "hired": mp.hire_id is not None,
+        "invited_by_member_id": mp.member.invited_by_member_id,
+        "invited_by_name": mp.member.invited_by.display_name if mp.member.invited_by is not None else None,
         "confirmed_at": mp.confirmed_at,
         "waitlist_position": waitlist_position,
         "promotion_offered_at": mp.promotion_offered_at,
@@ -204,13 +248,21 @@ def confirm(
         _set_confirmed(mp)
         title, body = "Presença confirmada", f"Você está confirmado em {match.name}."
     else:
+        if waitlist_full(db, match):
+            raise BusinessRuleError("Vagas e lista de espera esgotadas", code="waitlist_full")
         _enter_waitlist(db, match, mp)
         db.flush()
-        position = len(waitlist(db, match))
-        warnings.append(f"Vagas esgotadas: você entrou na lista de espera (posição {position})")
-        title, body = "Lista de espera", f"Você está na posição {position} da lista de espera de {match.name}."
-    notifications.notify(db, [member.user_id], NotificationType.CONFIRMATION_REGISTERED, title, body,
-                         group_id=group.id, match_id=match.id)
+        if maybe_expand(db, group, match) and mp.status == S.CONFIRMED:
+            # quem lotou a espera já foi avisado pela promoção
+            warnings.append(f"A lista de espera lotou e a pelada aumentou para {match.slots} jogadores")
+            title = body = None
+        else:
+            position = len(waitlist(db, match))
+            warnings.append(f"Vagas esgotadas: você entrou na lista de espera (posição {position})")
+            title, body = "Lista de espera", f"Você está na posição {position} da lista de espera de {match.name}."
+    if title:
+        notifications.notify(db, [member.user_id], NotificationType.CONFIRMATION_REGISTERED, title, body,
+                             group_id=group.id, match_id=match.id)
     if debts:
         notifications.notify(
             db, group_admin_user_ids(db, group.id), NotificationType.PAYMENT_PENDING,
@@ -276,13 +328,16 @@ def promote_waitlist(db: Session, match: Match) -> list[MatchPlayer]:
         if not candidates:
             break
         mp = candidates[0]
-        if match.waitlist_auto_promote:
+        if match.waitlist_auto_promote or mp.member.is_invited_guest:  # convidado não tem como aceitar
             _set_confirmed(mp)
             title, body = "Vaga liberada: você está confirmado", f"Você foi promovido da lista de espera em {match.name}."
         else:
             mp.promotion_offered_at = _now()
             title, body = "Vaga liberada", f"Abriu uma vaga em {match.name}. Aceite para garantir sua participação."
-        notifications.notify(db, [mp.member.user_id], NotificationType.SPOT_AVAILABLE, title, body,
+        if mp.member.is_invited_guest:  # convidado sem conta: o aviso vai para quem trouxe
+            title = "Vaga liberada: seu convidado está confirmado"
+            body = f"{mp.member.display_name} saiu da lista de espera e está confirmado em {match.name}."
+        notifications.notify(db, [notify_user_id(mp.member)], NotificationType.SPOT_AVAILABLE, title, body,
                              group_id=match.group_id, match_id=match.id)
         db.flush()
         promoted.append(mp)
@@ -307,7 +362,7 @@ def admin_update(
     if match.status == MatchStatus.CANCELLED:
         raise BusinessRuleError("Pelada cancelada", code="invalid_status")
     member = get_member_in_group(db, group.id, member_id)
-    if member.status != MemberStatus.ACTIVE:
+    if member.status != MemberStatus.ACTIVE and not (member.status == MemberStatus.GUEST and member.is_invited_guest):
         raise BusinessRuleError("Jogador não está ativo no grupo", code="member_inactive")
     mp = _get_or_create(db, match, member)
     before = audit.snapshot(mp, _MP_FIELDS)
@@ -336,6 +391,7 @@ def admin_update(
             _set_confirmed(mp)  # admin pode exceder o limite de vagas conscientemente
         elif new == S.WAITLIST:
             _enter_waitlist(db, match, mp)
+            maybe_expand(db, group, match)
         else:
             if new == S.CANCELLED:
                 mp.cancelled_at = _now()
@@ -418,7 +474,7 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
             if created:
                 p.notes = charge_note
                 payments_created += 1
-                new_payment_users.append(member.user_id)
+                new_payment_users.append(notify_user_id(member))
             elif p.status == PaymentStatus.REFUNDED and p.notes == payments_auto_note():
                 p.status = PaymentStatus.PENDING
                 p.notes = None
@@ -430,7 +486,7 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
                     p, _ = payments.ensure_charge(db, match, member_id, penalty)
                     p.notes = NO_SHOW_NOTE
                     payments_created += 1
-                    new_payment_users.append(member.user_id)
+                    new_payment_users.append(notify_user_id(member))
                 elif p.status == PaymentStatus.REFUNDED and p.notes == payments_auto_note():
                     p.status = PaymentStatus.PENDING
                     p.notes = NO_SHOW_NOTE
@@ -452,7 +508,7 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
             if created:
                 p.notes = LATE_CANCEL_NOTE
                 payments_created += 1
-                new_payment_users.append(mp.member.user_id)
+                new_payment_users.append(notify_user_id(mp.member))
 
     if match.split_cost and charged:
         # correção de presença no rateio: a parte de cada um muda com o número de pagantes
@@ -485,6 +541,7 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
                 MatchPlayer.is_referee.is_(False), MatchPlayer.hire_id.is_(None),
             )
         ).all()
+        if not mp.member.is_invited_guest  # convidado não tem conta: é avaliado, mas não avalia
     ]
     if match.evaluation_status == EvaluationStatus.NOT_OPEN:
         now = _now()

@@ -37,6 +37,12 @@ class MatchSeries(Base):
     field_players_per_team: Mapped[int] = mapped_column(Integer)
     goalkeepers_per_team: Mapped[int] = mapped_column(Integer, default=1)
     referee_slots: Mapped[int] = mapped_column(Integer, default=0)  # vagas de juiz (fora das vagas de jogador)
+    # times previstos (padrão do sorteio) e lista de espera limitada que pode aumentar a pelada uma vez:
+    # quando a espera lota, as vagas crescem do tamanho da espera e os times passam a `expanded_num_teams`
+    num_teams: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    waitlist_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)  # nulo = espera sem limite
+    expand_when_waitlist_full: Mapped[bool] = mapped_column(Boolean, default=False)
+    expanded_num_teams: Mapped[int | None] = mapped_column(Integer, nullable=True)
     confirmation_deadline_hours: Mapped[int] = mapped_column(Integer, default=2)  # antes do início
     cancellation_deadline_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
     evaluation_window_hours: Mapped[int] = mapped_column(Integer, default=24)
@@ -77,10 +83,17 @@ class Match(Base):
     field_players_per_team: Mapped[int] = mapped_column(Integer)
     goalkeepers_per_team: Mapped[int] = mapped_column(Integer, default=1)
     referee_slots: Mapped[int] = mapped_column(Integer, default=0)  # vagas de juiz (fora das vagas de jogador)
+    # times previstos (padrão do sorteio) e lista de espera limitada que pode aumentar a pelada uma vez:
+    # quando a espera lota, as vagas crescem do tamanho da espera e os times passam a `expanded_num_teams`
+    num_teams: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    waitlist_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)  # nulo = espera sem limite
+    expand_when_waitlist_full: Mapped[bool] = mapped_column(Boolean, default=False)
+    expanded_num_teams: Mapped[int | None] = mapped_column(Integer, nullable=True)
     confirmation_deadline: Mapped[datetime] = mapped_column(UTCDateTime)
     cancellation_deadline: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     evaluation_window_hours: Mapped[int] = mapped_column(Integer, default=24)
     waitlist_auto_promote: Mapped[bool] = mapped_column(Boolean, default=True)
+    expanded_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)  # quando a pelada aumentou
     responsible_admin_ids: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[MatchStatus] = mapped_column(str_enum(MatchStatus), default=MatchStatus.DRAFT)
 

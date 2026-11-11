@@ -20,7 +20,7 @@ from app.domain.enums import (
     Recurrence,
 )
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, MatchSeries, User
-from app.schemas.match import MatchCreate, MatchUpdate, SeriesCreate, SeriesUpdate
+from app.schemas.match import MatchCreate, MatchUpdate, SeriesCreate, SeriesUpdate, check_expansion
 from app.domain import money
 from app.services import audit, notifications, venue_finance, venues
 from app.services.groups import group_admin_user_ids
@@ -30,12 +30,25 @@ DEFAULT_CONFIRMATION_HOURS = 2
 _MATCH_AUDIT_FIELDS = [
     "name", "description", "modality", "location", "address", "court_id", "starts_at", "ends_at", "price", "slots",
     "field_players_per_team", "goalkeepers_per_team", "referee_slots", "split_cost", "field_cost",
+    "num_teams", "waitlist_limit", "expand_when_waitlist_full", "expanded_num_teams",
     "confirmation_deadline", "cancellation_deadline",
     "evaluation_window_hours", "waitlist_auto_promote", "responsible_admin_ids", "status",
 ]
 
 
 # ------------------------------------------------------------------ validações
+
+# times e lista de espera: nulo também é valor (sem limite / sem previsão)
+_NULLABLE_TEAM_FIELDS = ("num_teams", "waitlist_limit", "expanded_num_teams")
+
+
+def _check_expansion(obj) -> None:
+    if getattr(obj, "expanded_at", None) is not None:
+        return  # a pelada já aumentou: a regra não vale mais
+    try:
+        check_expansion(obj.waitlist_limit, obj.expand_when_waitlist_full, obj.num_teams, obj.expanded_num_teams)
+    except ValueError as exc:
+        raise BusinessRuleError(str(exc), code="invalid_expansion") from None
 
 
 def _validate_schedule(starts_at: datetime, ends_at: datetime, confirmation: datetime, cancellation: datetime | None):
@@ -123,6 +136,10 @@ def create_match(
         field_players_per_team=data.field_players_per_team,
         goalkeepers_per_team=data.goalkeepers_per_team,
         referee_slots=data.referee_slots,
+        num_teams=data.num_teams,
+        waitlist_limit=data.waitlist_limit,
+        expand_when_waitlist_full=data.expand_when_waitlist_full,
+        expanded_num_teams=data.expanded_num_teams,
         confirmation_deadline=confirmation,
         cancellation_deadline=cancellation,
         evaluation_window_hours=data.evaluation_window_hours,
@@ -183,9 +200,11 @@ def update_match(db: Session, group: FootballGroup, match: Match, data: MatchUpd
     court_changed = "court_id" in changes and changes["court_id"] != match.court_id
     old_times = (match.starts_at, match.ends_at)
     for key, value in changes.items():
-        if value is None and key not in ("description", "address", "cancellation_deadline", "court_id"):
+        if value is None and key not in ("description", "address", "cancellation_deadline", "court_id",
+                                         *_NULLABLE_TEAM_FIELDS):
             continue
         setattr(match, key, value)
+    _check_expansion(match)
     if match.split_cost and match.field_cost is None and match.court_id is not None:
         court = venues.court_for_group(db, group, match.court_id)
         match.field_cost = venue_finance.rent_amount(db, group.id, court, match.duration_minutes)
@@ -203,6 +222,8 @@ def update_match(db: Session, group: FootballGroup, match: Match, data: MatchUpd
                      group_id=group.id, before=before, after=after)
     if match.status == MatchStatus.PUBLISHED and match.slots > before["slots"]:
         attendance.promote_waitlist(db, match)
+    if match.status == MatchStatus.PUBLISHED:
+        attendance.maybe_expand(db, group, match)  # a espera pode já estar cheia com a nova regra
     db.commit()
     return match
 
@@ -403,9 +424,11 @@ def update_series(db: Session, group: FootballGroup, series: MatchSeries, data: 
         changes.setdefault("location", label)
         changes["address"] = changes.get("address") or venue_address
     for key, value in changes.items():
-        if value is None and key not in ("description", "address", "cancellation_deadline_hours", "court_id"):
+        if value is None and key not in ("description", "address", "cancellation_deadline_hours", "court_id",
+                                         *_NULLABLE_TEAM_FIELDS):
             continue
         setattr(series, key, value)
+    _check_expansion(series)
     audit.record(db, action="series.updated", entity_type="match_series", entity_id=series.id,
                  actor_user_id=actor.id, group_id=group.id, before=before, after=audit.snapshot(series, fields))
     db.commit()
@@ -444,6 +467,10 @@ def generate_occurrences(
             field_players_per_team=series.field_players_per_team,
             goalkeepers_per_team=series.goalkeepers_per_team,
             referee_slots=series.referee_slots,
+            num_teams=series.num_teams,
+            waitlist_limit=series.waitlist_limit,
+            expand_when_waitlist_full=series.expand_when_waitlist_full,
+            expanded_num_teams=series.expanded_num_teams,
             evaluation_window_hours=series.evaluation_window_hours,
             responsible_admin_ids=series.responsible_admin_ids or [],
             starts_at=starts_at,

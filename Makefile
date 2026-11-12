@@ -14,7 +14,7 @@ export MSYS_NO_PATHCONV := 1
 VPS     ?= vps
 REMOTO  ?= /srv/pelada
 FRONT   := frontend/pelada-equilibrada
-DOMINIO ?= https://pelada.rodricode.com.br
+DOMINIO ?= https://peladafacil.rodricode.com.br
 
 .PHONY: help deploy push atualizar checar status logs logs-web health ssh backup
 

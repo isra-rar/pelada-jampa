@@ -80,8 +80,10 @@ def guest_out(db: Session, guest: GroupMember, viewer: GroupMember, level: dict 
 
 
 def create_guest(
-    db: Session, group: FootballGroup, inviter: GroupMember, name: str, stars: int, goalkeeper: bool
+    db: Session, group: FootballGroup, inviter: GroupMember, name: str, stars: int, goalkeeper: bool,
+    *, self_joined: bool = False,
 ) -> GroupMember:
+    """`self_joined`: o próprio convidado entrou pelo link; o nível é palpite dele e sempre vai para o admin."""
     if not 0 <= stars <= R.MAX_STARS:
         raise BusinessRuleError("Escolha um nível de 0 a 5 estrelas", code="invalid_stars")
     user = User(email=_guest_email(), name=name.strip(), password_hash=None)
@@ -106,26 +108,28 @@ def create_guest(
     rating.average = R.compute_average(rating.attributes, keys)
     rating.stars = R.compute_stars(rating.average, thresholds)
     rating.updated_at = utcnow()
-    reason = "level_confirmed" if inviter.is_admin else "guest_level"
+    auto_confirmed = inviter.is_admin and not self_joined
+    reason = "level_confirmed" if auto_confirmed else "guest_level"
     ratings.record_history(db, rating, reason=reason, before=before, avg_before=avg_before,
                            stars_before=stars_before, actor_user_id=inviter.user_id)
 
     guest.self_assessment_kind = kind.value
     guest.self_assessed_at = utcnow()
     guest.declared_stars = stars
-    if inviter.is_admin:
+    if auto_confirmed:
         guest.confirmed_stars = stars
         guest.level_reviewed_at = utcnow()
     audit.record(db, action="guest.created", entity_type="group_member", entity_id=guest.id,
                  actor_user_id=inviter.user_id, group_id=group.id,
                  after={"name": user.name, "stars": stars, "goalkeeper": goalkeeper, "invited_by": inviter.id})
-    if not inviter.is_admin:
+    if not auto_confirmed:
         admins = level_quiz.active_admin_ids(db, group.id)
         where = " no gol" if goalkeeper else ""
+        who = (f"{user.name} entrou pelo link de {inviter.display_name} e diz ter" if self_joined
+               else f"{inviter.display_name} convidou {user.name} e acha que ele tem")
         notifications.notify(
             db, admins, NotificationType.MEMBERSHIP, "Nível de convidado para confirmar",
-            f"{inviter.display_name} convidou {user.name} e acha que ele tem "
-            f"{level_quiz.stars_text(stars)}{where}. Confirme o nível em Gestão > Membros.",
+            f"{who} {level_quiz.stars_text(stars)}{where}. Confirme o nível em Gestão > Membros.",
             group_id=group.id,
         )
     db.commit()

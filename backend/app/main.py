@@ -87,6 +87,7 @@ def create_app() -> FastAPI:
         guard = [Depends(block_writes_in_suspended_group)] if module in group_scoped else []
         app.include_router(module.router, prefix=API_PREFIX, dependencies=guard)
     app.include_router(stats.public_router, prefix=API_PREFIX)
+    app.include_router(guests.public_router, prefix=API_PREFIX)
     app.include_router(discover.public_router, prefix=API_PREFIX)
     app.include_router(pros.public_router, prefix=API_PREFIX)
     # fotos enviadas pelos usuários (o tipo é validado pelo conteúdo no upload)

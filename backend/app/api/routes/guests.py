@@ -1,11 +1,27 @@
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 
 from app.api.deps import DB, CurrentUser
-from app.schemas.guest import GuestCreate, GuestMatchIn, GuestMatchOut, GuestOut, GuestUpdate
-from app.services import attendance, guests, level_quiz
+from app.core import rate_limit as rl
+from app.core.db import utcnow
+from app.core.errors import BusinessRuleError
+from app.domain.enums import MatchStatus
+from app.schemas.guest import (
+    GuestCreate,
+    GuestJoinIn,
+    GuestJoinOut,
+    GuestLinkOut,
+    GuestLinkPreviewOut,
+    GuestMatchIn,
+    GuestMatchOut,
+    GuestOut,
+    GuestPassOut,
+    GuestUpdate,
+)
+from app.services import attendance, guest_pass, guests, level_quiz
 from app.services.access import get_group, match_for_member, require_member
 
 router = APIRouter(tags=["Convidados"])
+public_router = APIRouter(prefix="/public/guest", tags=["Convidado sem login"])
 
 
 @router.get("/groups/{group_id}/guests", response_model=list[GuestOut])
@@ -62,3 +78,39 @@ def remove_guest_from_match(match_id: int, member_id: int, user: CurrentUser, db
     guest = guests.get_guest(db, group.id, member_id)
     mp = guests.remove_from_match(db, group, match, guest, me)
     return {"participation": attendance.participation_out(mp), "warnings": []}
+
+
+@router.get("/matches/{match_id}/guest-link", response_model=GuestLinkOut)
+def guest_link(match_id: int, user: CurrentUser, db: DB):
+    """Link da pelada para mandar a quem não tem conta. Quem entrar por ele vira convidado de quem compartilhou
+    (e a cobrança vai para quem compartilhou)."""
+    match, me = match_for_member(db, match_id, user)
+    if match.status != MatchStatus.PUBLISHED or utcnow() >= match.starts_at:
+        raise BusinessRuleError("Só peladas publicadas e ainda não iniciadas têm link de convidado",
+                                code="match_not_open")
+    return {"token": guest_pass.invite_token(match, me), "expires_at": match.starts_at}
+
+
+@public_router.get("/link/{token}", response_model=GuestLinkPreviewOut)
+def link_preview(token: str, db: DB):
+    """Prévia da pelada para quem abriu o link (sem login)."""
+    return guest_pass.link_preview(db, token)
+
+
+@public_router.post("/link/{token}/join", response_model=GuestJoinOut, status_code=status.HTTP_201_CREATED)
+def join_by_link(token: str, data: GuestJoinIn, request: Request, db: DB):
+    """Entra na pelada como convidado, sem login. Devolve o passe que dá acesso de leitura à pelada."""
+    rl.limiter.consume(rl.GUEST_JOIN_PER_IP, rl.client_ip(request))
+    rl.limiter.consume(rl.GUEST_JOIN_PER_LINK, token[-40:])
+    return guest_pass.join(db, token, data.name, data.stars, data.goalkeeper)
+
+
+@public_router.get("/pass/{token}", response_model=GuestPassOut)
+def pass_view(token: str, db: DB):
+    return guest_pass.view(db, token)
+
+
+@public_router.post("/pass/{token}/leave", response_model=GuestPassOut)
+def pass_leave(token: str, db: DB):
+    """O convidado desiste da pelada."""
+    return guest_pass.leave(db, token)

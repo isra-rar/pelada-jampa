@@ -36,6 +36,9 @@ RESET_CONFIRM_FAIL_PER_IP = Rule("reset-confirm:ip", 10, 15 * 60)
 GOOGLE_FAIL_PER_IP = Rule("google:ip", 30, 15 * 60)
 # senha pedida com a sessão aberta (troca de senha, exclusão de conta): limita quem roubou um token
 PASSWORD_CHECK_FAIL_PER_USER = Rule("password:user", 5, 15 * 60)
+# entrada de convidado pelo link da pelada (sem login): limita cadastro em massa
+GUEST_JOIN_PER_IP = Rule("guest-join:ip", 10, 60 * 60)
+GUEST_JOIN_PER_LINK = Rule("guest-join:link", 40, 60 * 60)
 
 
 class RateLimiter:
@@ -114,6 +117,8 @@ _ALL_RULES = (
     RESET_CONFIRM_FAIL_PER_IP,
     GOOGLE_FAIL_PER_IP,
     PASSWORD_CHECK_FAIL_PER_USER,
+    GUEST_JOIN_PER_IP,
+    GUEST_JOIN_PER_LINK,
 )
 
 limiter = RateLimiter()

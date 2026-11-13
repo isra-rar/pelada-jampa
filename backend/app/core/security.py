@@ -52,3 +52,22 @@ def decode_access_claims(token: str) -> tuple[int, int] | None:
         return int(payload["sub"]), int(payload.get("iat", 0))
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def create_scoped_token(kind: str, claims: dict[str, int], expires_at) -> str:
+    """Token assinado de escopo restrito (link de convite da pelada, passe do convidado). Nunca vale como login."""
+    payload = {**claims, "type": kind, "exp": int(expires_at.timestamp()), "iat": int(utcnow().timestamp())}
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_scoped_token(kind: str, token: str) -> dict | None:
+    try:
+        payload = jwt.decode(
+            token, settings.jwt_secret, algorithms=[settings.jwt_algorithm],
+            options={"verify_exp": False, "require": ["exp"]},
+        )
+    except jwt.PyJWTError:
+        return None
+    if payload.get("type") != kind or int(payload["exp"]) <= int(utcnow().timestamp()):
+        return None
+    return payload

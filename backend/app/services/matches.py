@@ -337,6 +337,13 @@ def attendance_counts(db: Session, match: Match) -> dict:
             MatchPlayer.promotion_offered_at.is_not(None),
         )
     ) or 0
+    if match.goalkeepers_per_team > 0:
+        # goleiros têm 2 vagas próprias: "confirmados" é a linha, comparável com as vagas da pelada
+        counts["goalkeepers"] = db.scalar(select(func.count()).where(
+            MatchPlayer.match_id == match.id, MatchPlayer.is_goalkeeper.is_(True),
+            MatchPlayer.is_referee.is_(False), MatchPlayer.status == AttendanceStatus.CONFIRMED,
+        )) or 0
+        counts["confirmed"] -= counts["goalkeepers"]
     counts["available_slots"] = max(0, match.slots - counts["confirmed"] - offered)
     return counts
 

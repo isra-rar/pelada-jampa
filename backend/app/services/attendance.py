@@ -107,15 +107,50 @@ def maybe_expand(db: Session, group: FootballGroup, match: Match) -> bool:
     return True
 
 
+GOALKEEPER_SLOTS = 2  # dois times em campo por vez: um goleiro em cada, mesmo com mais times no rodízio
+
+
+def goalkeeper_slots(match: Match) -> int:
+    """Vagas de goleiro, fora das vagas de linha (`slots`). Pelada sem goleiro (0 por time): nenhuma, e quem
+    for para o gol ocupa vaga comum."""
+    return GOALKEEPER_SLOTS if match.goalkeepers_per_team > 0 else 0
+
+
+def _own_goal_slots(match: Match, mp: MatchPlayer) -> bool:
+    return goalkeeper_slots(match) > 0 and mp.is_goalkeeper and not mp.is_referee
+
+
 def _occupied(db: Session, match: Match) -> int:
-    """Vagas de jogador ocupadas (juízes têm vaga própria e não contam)."""
+    """Vagas de linha ocupadas (juízes e, com vagas de goleiro, os goleiros têm vagas próprias e não contam)."""
     rows = db.scalars(
         select(MatchPlayer).where(
             MatchPlayer.match_id == match.id, MatchPlayer.status.in_([S.CONFIRMED, S.WAITLIST]),
             MatchPlayer.is_referee.is_(False),
         )
     ).all()
-    return sum(1 for r in rows if r.status == S.CONFIRMED or r.promotion_offered_at is not None)
+    return sum(
+        1 for r in rows
+        if (r.status == S.CONFIRMED or r.promotion_offered_at is not None) and not _own_goal_slots(match, r)
+    )
+
+
+def goalkeepers_taken(db: Session, match: Match, exclude_member_id: int | None = None) -> int:
+    """Vagas de goleiro ocupadas (confirmados ou já presentes, inclusive contratados)."""
+    stmt = select(func.count()).where(
+        MatchPlayer.match_id == match.id, MatchPlayer.is_goalkeeper.is_(True), MatchPlayer.is_referee.is_(False),
+        MatchPlayer.status.in_([S.CONFIRMED, S.PRESENT]),
+    )
+    if exclude_member_id is not None:
+        stmt = stmt.where(MatchPlayer.member_id != exclude_member_id)
+    return db.scalar(stmt) or 0
+
+
+def require_goalkeeper_slot(db: Session, match: Match, member_id: int) -> None:
+    if goalkeepers_taken(db, match, exclude_member_id=member_id) >= goalkeeper_slots(match):
+        raise BusinessRuleError(
+            f"As {goalkeeper_slots(match)} vagas de goleiro já estão preenchidas: confirme como jogador de linha",
+            code="goalkeeper_full",
+        )
 
 
 def referees_taken(db: Session, match: Match, exclude_member_id: int | None = None) -> int:
@@ -237,15 +272,37 @@ def confirm(
         db.commit()
         return mp, warnings, debts
 
+    gk_slots = goalkeeper_slots(match) > 0
     if mp.status in (S.CONFIRMED, S.WAITLIST) and not mp.is_referee:
-        mp.is_goalkeeper = as_goalkeeper
+        if not gk_slots or mp.is_goalkeeper == as_goalkeeper:
+            mp.is_goalkeeper = as_goalkeeper
+            db.commit()
+            return mp, warnings, debts  # idempotente
+        if as_goalkeeper:
+            # linha (ou espera) vai para o gol: ocupa vaga de goleiro e libera a de linha
+            require_goalkeeper_slot(db, match, member.id)
+            mp.is_goalkeeper = True
+            if mp.status == S.WAITLIST:
+                _set_confirmed(mp)
+                mp.waitlist_seq = mp.waitlist_joined_at = None
+            promote_waitlist(db, match)
+        else:
+            # goleiro vai para a linha: precisa de vaga de linha
+            if mp.status == S.CONFIRMED and _occupied(db, match) >= match.slots:
+                raise BusinessRuleError("As vagas de linha estão preenchidas", code="slots_full")
+            mp.is_goalkeeper = False
         db.commit()
-        return mp, warnings, debts  # idempotente
+        return mp, warnings, debts
 
     mp.is_goalkeeper = as_goalkeeper
     mp.is_referee = False  # deixa de apitar para jogar: precisa de vaga de jogador
     mp.responded_at = _now()
-    if _occupied(db, match) < match.slots:
+    if as_goalkeeper and gk_slots:
+        # goleiro tem vaga própria (fora das vagas de linha) e não entra na lista de espera
+        require_goalkeeper_slot(db, match, member.id)
+        _set_confirmed(mp)
+        title, body = "Presença confirmada", f"Você está confirmado no gol em {match.name}."
+    elif _occupied(db, match) < match.slots:
         _set_confirmed(mp)
         title, body = "Presença confirmada", f"Você está confirmado em {match.name}."
     else:
@@ -325,7 +382,8 @@ def promote_waitlist(db: Session, match: Match) -> list[MatchPlayer]:
     db.flush()
     promoted: list[MatchPlayer] = []
     while _occupied(db, match) < match.slots:
-        candidates = [mp for mp in waitlist(db, match) if mp.promotion_offered_at is None and not mp.blocked]
+        candidates = [mp for mp in waitlist(db, match)
+                      if mp.promotion_offered_at is None and not mp.blocked and not _own_goal_slots(match, mp)]
         if not candidates:
             break
         mp = candidates[0]

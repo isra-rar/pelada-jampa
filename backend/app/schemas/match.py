@@ -121,6 +121,7 @@ class AttendanceCounts(BaseModel):
     present: int = 0
     absent: int = 0
     available_slots: int = 0
+    goalkeepers: int = 0  # goleiros confirmados (vagas próprias, fora das de linha)
     referees: int = 0  # juízes confirmados (não ocupam vaga de jogador)
     hired: int = 0  # goleiros/juízes contratados confirmados
 

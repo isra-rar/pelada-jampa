@@ -193,7 +193,13 @@ def add_to_match(
     warnings: list[str] = []
     mp = attendance.get_participation(db, match, guest.id)
     if mp is not None and mp.status in (AttendanceStatus.CONFIRMED, AttendanceStatus.WAITLIST):
+        if as_goalkeeper and not mp.is_goalkeeper and attendance.goalkeeper_slots(match) > 0:
+            attendance.require_goalkeeper_slot(db, match, guest.id)
+            if mp.status == AttendanceStatus.WAITLIST:
+                attendance._set_confirmed(mp)
         mp.is_goalkeeper = as_goalkeeper
+        db.flush()
+        attendance.promote_waitlist(db, match)
         db.commit()
         return mp, warnings
     if mp is None:
@@ -203,7 +209,10 @@ def add_to_match(
     mp.is_goalkeeper = as_goalkeeper
     mp.blocked = False
     mp.responded_at = utcnow()
-    if attendance._occupied(db, match) < match.slots:
+    if as_goalkeeper and attendance.goalkeeper_slots(match) > 0:
+        attendance.require_goalkeeper_slot(db, match, guest.id)  # goleiro: vaga própria, sem lista de espera
+        attendance._set_confirmed(mp)
+    elif attendance._occupied(db, match) < match.slots:
         attendance._set_confirmed(mp)
     else:
         if attendance.waitlist_full(db, match):

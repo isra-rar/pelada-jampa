@@ -33,6 +33,9 @@ def _occupied_subquery():
     """Vagas ocupadas por pelada: confirmados + vagas oferecidas à lista de espera (mesma regra da confirmação)."""
     return (
         select(MatchPlayer.match_id, func.count().label("occupied"))
+        .join(Match, Match.id == MatchPlayer.match_id)
+        # goleiros têm vagas próprias quando a pelada tem goleiro
+        .where(or_(Match.goalkeepers_per_team == 0, MatchPlayer.is_goalkeeper.is_(False)))
         .where(MatchPlayer.is_referee.is_(False), or_(
             MatchPlayer.status == AttendanceStatus.CONFIRMED,
             and_(MatchPlayer.status == AttendanceStatus.WAITLIST, MatchPlayer.promotion_offered_at.is_not(None)),

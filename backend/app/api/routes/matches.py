@@ -7,7 +7,9 @@ from app.schemas.match import (
     AdminParticipationIn,
     ConfirmIn,
     ConfirmOut,
+    DuplicateIn,
     GenerateIn,
+    MakeRecurringIn,
     MatchCancel,
     MatchCreate,
     MatchOut,
@@ -68,6 +70,22 @@ def update_match(match_id: int, data: MatchUpdate, user: CurrentUser, db: DB):
 def publish_match(match_id: int, user: CurrentUser, db: DB):
     match, member = match_for_admin(db, match_id, user)
     return matches.match_out(db, matches.publish_match(db, get_group(db, match.group_id), match, user), member)
+
+
+@router.post("/matches/{match_id}/duplicate", response_model=MatchOut, status_code=status.HTTP_201_CREATED)
+def duplicate_match(match_id: int, data: DuplicateIn, user: CurrentUser, db: DB):
+    """Cópia da pelada, sem jogadores, em outra data (e já recorrente, se pedido)."""
+    match, member = match_for_admin(db, match_id, user)
+    group = get_group(db, match.group_id)
+    return matches.match_out(db, matches.duplicate_match(db, group, match, data, user), member)
+
+
+@router.post("/matches/{match_id}/recurrence", response_model=MatchOut)
+def make_recurring(match_id: int, data: MakeRecurringIn, user: CurrentUser, db: DB):
+    """Ativa a recorrência de uma pelada avulsa."""
+    match, member = match_for_admin(db, match_id, user)
+    group = get_group(db, match.group_id)
+    return matches.match_out(db, matches.make_recurring(db, group, match, data, user), member)
 
 
 @router.post("/matches/{match_id}/cancel", response_model=MatchOut)

@@ -97,6 +97,7 @@ def to_out(rating: PlayerRating) -> dict:
         "stars": rating.stars,
         "stars_label": R.star_label(rating.stars),
         "is_provisional": rating.is_provisional,
+        "initial_confirmed": bool(rating.initial_confirmed),
         "valid_evaluations_count": rating.valid_evaluations_count,
         "matches_evaluated_count": rating.matches_evaluated_count,
         "updated_at": rating.updated_at,
@@ -129,6 +130,7 @@ def set_provisional(
     rating.average = R.compute_average(clean, keys)
     rating.stars = R.compute_stars(rating.average, platform.star_thresholds(db))
     rating.updated_at = utcnow()
+    rating.initial_confirmed = True
     record_history(db, rating, reason="admin_provisional", before=before, avg_before=avg_before,
                    stars_before=stars_before, actor_user_id=actor_user_id)
     audit.record(

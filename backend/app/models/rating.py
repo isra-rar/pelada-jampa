@@ -21,6 +21,8 @@ class PlayerRating(Base):
     average: Mapped[float] = mapped_column(Float)
     stars: Mapped[int] = mapped_column(Integer)
     is_provisional: Mapped[bool] = mapped_column(Boolean, default=True)
+    # o admin já definiu a nota inicial (o card de edição some; reavaliar é um botão à parte)
+    initial_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     valid_evaluations_count: Mapped[int] = mapped_column(Integer, default=0)
     matches_evaluated_count: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

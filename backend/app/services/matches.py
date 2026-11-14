@@ -21,7 +21,15 @@ from app.domain.enums import (
     Recurrence,
 )
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, MatchSeries, User
-from app.schemas.match import MatchCreate, MatchUpdate, SeriesCreate, SeriesUpdate, check_expansion
+from app.schemas.match import (
+    DuplicateIn,
+    MakeRecurringIn,
+    MatchCreate,
+    MatchUpdate,
+    SeriesCreate,
+    SeriesUpdate,
+    check_expansion,
+)
 from app.domain import money
 from app.services import audit, notifications, venue_finance, venues
 from app.services.groups import group_admin_user_ids
@@ -424,6 +432,82 @@ def create_series(db: Session, group: FootballGroup, data: SeriesCreate, actor: 
     matches = generate_occurrences(db, group, series, data.generate_count, actor, commit=False) if data.generate_count else []
     db.commit()
     return series, matches
+
+
+def _hours_before(starts_at: datetime, deadline: datetime | None) -> int | None:
+    if deadline is None:
+        return None
+    return max(0, round((starts_at - deadline).total_seconds() / 3600))
+
+
+def make_recurring(db: Session, group: FootballGroup, match: Match, data: MakeRecurringIn, actor: User) -> Match:
+    """Pelada avulsa vira a primeira de uma série: o app passa a manter as próximas agendadas."""
+    if match.series_id is not None:
+        raise BusinessRuleError("Esta pelada já é recorrente", code="already_recurring")
+    if match.status not in (MatchStatus.DRAFT, MatchStatus.PUBLISHED):
+        raise BusinessRuleError("Só peladas abertas podem virar recorrentes", code="match_not_open")
+    if match.booking_status == BookingStatus.PENDING:
+        raise BusinessRuleError(
+            "Repetir só no espaço vinculado: aguarde o dono do espaço confirmar este horário",
+            code="booking_pending",
+        )
+    series = MatchSeries(
+        group_id=group.id, recurrence=data.recurrence, name=match.name, description=match.description,
+        modality=match.modality, location=match.location, address=match.address, court_id=match.court_id,
+        first_starts_at=match.starts_at, duration_minutes=match.duration_minutes, price=match.price,
+        split_cost=match.split_cost, field_cost=match.field_cost, slots=match.slots,
+        field_players_per_team=match.field_players_per_team, goalkeepers_per_team=match.goalkeepers_per_team,
+        referee_slots=match.referee_slots, num_teams=match.num_teams, waitlist_limit=match.waitlist_limit,
+        expand_when_waitlist_full=match.expand_when_waitlist_full, expanded_num_teams=match.expanded_num_teams,
+        confirmation_deadline_hours=_hours_before(match.starts_at, match.confirmation_deadline) or 0,
+        cancellation_deadline_hours=_hours_before(match.starts_at, match.cancellation_deadline),
+        evaluation_window_hours=match.evaluation_window_hours,
+        responsible_admin_ids=list(match.responsible_admin_ids or []), auto_generate_ahead=data.keep_ahead,
+        last_generated_starts_at=match.starts_at, created_by_id=actor.id,
+    )
+    db.add(series)
+    db.flush()
+    match.series_id = series.id
+    audit.record(db, action="series.created", entity_type="match_series", entity_id=series.id,
+                 actor_user_id=actor.id, group_id=group.id,
+                 after={"from_match_id": match.id, "recurrence": data.recurrence, "keep_ahead": data.keep_ahead})
+    generate_occurrences(db, group, series, data.keep_ahead, actor, commit=False, skip_conflicts=True)
+    db.commit()
+    return match
+
+
+def duplicate_match(db: Session, group: FootballGroup, match: Match, data: DuplicateIn, actor: User) -> Match:
+    """Cópia idêntica da pelada, sem jogadores, em outra data. Opcionalmente já recorrente."""
+    starts_at = _aware(data.starts_at)
+    duration = timedelta(minutes=match.duration_minutes)
+    confirm_h = _hours_before(match.starts_at, match.confirmation_deadline)
+    cancel_h = _hours_before(match.starts_at, match.cancellation_deadline)
+    # pelada que já aumentou: a cópia volta ao tamanho original (a regra de aumento continua valendo)
+    original_slots = match.slots - (match.waitlist_limit or 0) if match.expanded_at else match.slots
+    create = MatchCreate(
+        name=match.name, description=match.description, modality=match.modality, location=match.location,
+        address=match.address, court_id=match.court_id, price=match.price, split_cost=match.split_cost,
+        field_cost=match.field_cost, slots=original_slots,
+        field_players_per_team=match.field_players_per_team, goalkeepers_per_team=match.goalkeepers_per_team,
+        referee_slots=match.referee_slots, num_teams=match.num_teams, waitlist_limit=match.waitlist_limit,
+        expand_when_waitlist_full=match.expand_when_waitlist_full, expanded_num_teams=match.expanded_num_teams,
+        evaluation_window_hours=match.evaluation_window_hours,
+        responsible_admin_ids=list(match.responsible_admin_ids or []),
+        starts_at=starts_at, ends_at=starts_at + duration,
+        confirmation_deadline=starts_at - timedelta(hours=confirm_h if confirm_h is not None else 2),
+        cancellation_deadline=starts_at - timedelta(hours=cancel_h) if cancel_h is not None else None,
+        waitlist_auto_promote=match.waitlist_auto_promote,
+        publish=data.publish or data.recurrence is not None,
+    )
+    new = create_match(db, group, create, actor, commit=False)
+    audit.record(db, action="match.duplicated", entity_type="match", entity_id=new.id, actor_user_id=actor.id,
+                 group_id=group.id, after={"from_match_id": match.id})
+    if data.recurrence is not None:
+        db.flush()
+        return make_recurring(db, group, new, MakeRecurringIn(recurrence=data.recurrence, keep_ahead=data.keep_ahead),
+                              actor)
+    db.commit()
+    return new
 
 
 def update_series(db: Session, group: FootballGroup, series: MatchSeries, data: SeriesUpdate, actor: User):

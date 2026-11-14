@@ -253,6 +253,22 @@ class SeriesOut(ORMModel):
     last_generated_starts_at: datetime | None
 
 
+class MakeRecurringIn(BaseModel):
+    """Transforma uma pelada avulsa em recorrente: a série copia os dados dela."""
+
+    recurrence: Recurrence
+    keep_ahead: int = Field(default=2, ge=1, le=8, description="Ocorrências futuras que o app mantém agendadas")
+
+
+class DuplicateIn(BaseModel):
+    """Cópia da pelada (sem jogadores) para outra data; já pode virar recorrente."""
+
+    starts_at: datetime
+    publish: bool = True
+    recurrence: Recurrence | None = None
+    keep_ahead: int = Field(default=2, ge=1, le=8)
+
+
 class GenerateIn(BaseModel):
     count: int = Field(default=4, ge=1, le=26)
 

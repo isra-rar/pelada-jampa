@@ -19,6 +19,7 @@ class RatingOut(BaseModel):
     stars: int  # nível de 0 a 5 estrelas
     stars_label: str
     is_provisional: bool
+    initial_confirmed: bool = False
     valid_evaluations_count: int
     matches_evaluated_count: int
     updated_at: datetime

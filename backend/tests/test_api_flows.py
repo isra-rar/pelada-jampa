@@ -90,12 +90,16 @@ def test_profile_starts_provisional_and_admin_can_set_initial(apiclient):
     prof = api.get(f"{G}/{gid}/players/me", players[0])
     field = prof["ratings"][0]
     assert field["is_provisional"] and field["stars"] == 3 and field["average"] == 2.5
+    assert field["initial_confirmed"] is False  # o card de nota inicial aparece para o admin
     api.put(f"{G}/{gid}/players/{mid}/provisional-rating", players[0], 403,
             json={"attributes": {k: 5 for k in field["attributes"]}})
     r = api.put(f"{G}/{gid}/players/{mid}/provisional-rating", admin,
                 json={"attributes": {"finishing": 5, "passing": 4.5, "dribbling": 4.5, "defense": 4.5,
                                      "physical": 4.0}})
     assert r["average"] == 4.5 and r["stars"] == 5 and r["is_provisional"]
+    assert r["initial_confirmed"] is True  # confirmada: o card some e vira botão de reavaliar
+    again = api.get(f"{G}/{gid}/players/me", players[0])["ratings"][0]
+    assert again["initial_confirmed"] is True
 
 
 # ------------------------------------------------------------------ confirmação / lista de espera

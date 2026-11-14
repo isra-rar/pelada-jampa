@@ -16,7 +16,8 @@ def test_guest_joins_by_link_without_login(apiclient):
     token = api.get(f"/matches/{mid}/guest-link", beto)["token"]
     assert len(token) == 8 and api.get(f"/matches/{mid}/guest-link", beto)["token"] == token
     shared = api.get(f"/matches/{mid}/share-links", beto)
-    assert shared["guest_token"] == token and len(shared["invite_token"]) == 8
+    assert shared["guest_token"] == token and shared["invite_token"] == token  # mesmo código nas duas portas
+    assert api.get(f"/public/invites/{token}", {})["group_id"] == group["id"]
     prev = api.get(f"{PUB}/link/{token}", {})
     assert prev["can_join"] and prev["invited_by_name"] == "Jogador0" and prev["match"]["available_slots"] == 4
 

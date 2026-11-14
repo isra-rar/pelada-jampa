@@ -9,7 +9,7 @@ from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, Conflict, NotFound
 from app.core.security import short_code
 from app.domain.enums import AttendanceStatus, GroupRole, MatchStatus, MemberStatus, NotificationType, Position
-from app.models import FootballGroup, GroupMember, Match, MatchPlayer, SpecialSkill, User
+from app.models import FootballGroup, GroupMember, Match, MatchGuestLink, MatchPlayer, SpecialSkill, User
 from app.schemas.group import GroupCreate, GroupUpdate, MemberAdd, MemberAdminUpdate, MyMemberUpdate
 from app.services import audit, notifications, platform, ratings, users
 
@@ -213,8 +213,16 @@ def _join(
 
 
 def find_by_invite(db: Session, token: str) -> FootballGroup | None:
-    """Acha o grupo pelo código do convite (curto, sem diferenciar maiúsculas) ou pelo token longo antigo."""
-    return db.scalar(select(FootballGroup).where(FootballGroup.invite_token.in_([token, token.upper()])))
+    """Acha o grupo pelo código do convite do grupo ou pelo código de compartilhamento de uma pelada
+    (o mesmo código serve em /convite e em /convidado; muda só a porta de entrada)."""
+    group = db.scalar(select(FootballGroup).where(FootballGroup.invite_token.in_([token, token.upper()])))
+    if group is not None:
+        return group
+    return db.scalar(
+        select(FootballGroup).join(Match, Match.group_id == FootballGroup.id)
+        .join(MatchGuestLink, MatchGuestLink.match_id == Match.id)
+        .where(MatchGuestLink.code == token.upper())
+    )
 
 
 def join_by_token(db: Session, user: User, token: str) -> GroupMember:

@@ -98,9 +98,11 @@ def share_links(match_id: int, user: CurrentUser, db: DB):
     match, me = match_for_member(db, match_id, user)
     group = get_group(db, match.group_id)
     can_guest = match.status == MatchStatus.PUBLISHED and utcnow() < match.starts_at
+    code = guest_pass.invite_token(db, match, me) if can_guest else None
+    # um código só: /convidado/<código> entra sem conta, /convite/<código> entra no grupo
     return {
-        "guest_token": guest_pass.invite_token(db, match, me) if can_guest else None,
-        "invite_token": group.invite_token if group.is_active else None,
+        "guest_token": code,
+        "invite_token": code or (group.invite_token if group.is_active else None),
         "expires_at": match.starts_at,
     }
 

@@ -16,6 +16,7 @@ from app.schemas.guest import (
     GuestOut,
     GuestPassOut,
     GuestUpdate,
+    ShareLinksOut,
 )
 from app.services import attendance, guest_pass, guests, level_quiz
 from app.services.access import get_group, match_for_member, require_member
@@ -88,7 +89,20 @@ def guest_link(match_id: int, user: CurrentUser, db: DB):
     if match.status != MatchStatus.PUBLISHED or utcnow() >= match.starts_at:
         raise BusinessRuleError("Só peladas publicadas e ainda não iniciadas têm link de convidado",
                                 code="match_not_open")
-    return {"token": guest_pass.invite_token(match, me), "expires_at": match.starts_at}
+    return {"token": guest_pass.invite_token(db, match, me), "expires_at": match.starts_at}
+
+
+@router.get("/matches/{match_id}/share-links", response_model=ShareLinksOut)
+def share_links(match_id: int, user: CurrentUser, db: DB):
+    """Os dois links para compartilhar a pelada: convidado sem conta e convite normal (entra no grupo)."""
+    match, me = match_for_member(db, match_id, user)
+    group = get_group(db, match.group_id)
+    can_guest = match.status == MatchStatus.PUBLISHED and utcnow() < match.starts_at
+    return {
+        "guest_token": guest_pass.invite_token(db, match, me) if can_guest else None,
+        "invite_token": group.invite_token if group.is_active else None,
+        "expires_at": match.starts_at,
+    }
 
 
 @public_router.get("/link/{token}", response_model=GuestLinkPreviewOut)

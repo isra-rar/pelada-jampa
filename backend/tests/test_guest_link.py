@@ -14,6 +14,9 @@ def test_guest_joins_by_link_without_login(apiclient):
     mid = api.post(f"{G}/{gid}/matches", admin, 201, json=match_payload(slots=4, price="20.00"))["id"]
 
     token = api.get(f"/matches/{mid}/guest-link", beto)["token"]
+    assert len(token) == 8 and api.get(f"/matches/{mid}/guest-link", beto)["token"] == token
+    shared = api.get(f"/matches/{mid}/share-links", beto)
+    assert shared["guest_token"] == token and len(shared["invite_token"]) == 8
     prev = api.get(f"{PUB}/link/{token}", {})
     assert prev["can_join"] and prev["invited_by_name"] == "Jogador0" and prev["match"]["available_slots"] == 4
 

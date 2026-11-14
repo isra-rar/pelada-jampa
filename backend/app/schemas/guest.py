@@ -52,6 +52,12 @@ class GuestLinkOut(BaseModel):
     expires_at: datetime
 
 
+class ShareLinksOut(BaseModel):
+    guest_token: str | None  # None quando a pelada não aceita mais convidado
+    invite_token: str | None
+    expires_at: datetime
+
+
 class GuestJoinIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     stars: int = Field(default=2, ge=0, le=5)  # nível que o convidado acha que tem (o admin confirma)

@@ -163,3 +163,16 @@ class MatchPlayer(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     member = relationship("GroupMember", lazy="joined")
+
+
+class MatchGuestLink(Base):
+    """Código curto do link de convidado: uma pelada compartilhada por um membro (a cobrança vai para ele)."""
+
+    __tablename__ = "match_guest_links"
+    __table_args__ = (UniqueConstraint("match_id", "sharer_member_id", name="uq_guest_link_match_sharer"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    sharer_member_id: Mapped[int] = mapped_column(ForeignKey("group_members.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)

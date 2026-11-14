@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, Conflict, NotFound
+from app.core.security import short_code
 from app.domain.enums import AttendanceStatus, GroupRole, MatchStatus, MemberStatus, NotificationType, Position
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, SpecialSkill, User
 from app.schemas.group import GroupCreate, GroupUpdate, MemberAdd, MemberAdminUpdate, MyMemberUpdate
@@ -51,6 +52,14 @@ def _new_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def _new_invite_code(db: Session) -> str:
+    """Código curto do convite do grupo (8 caracteres), único."""
+    while True:
+        code = short_code(8)
+        if db.scalar(select(FootballGroup.id).where(FootballGroup.invite_token == code)) is None:
+            return code
+
+
 # ------------------------------------------------------------------ grupos
 
 
@@ -65,7 +74,7 @@ def create_group(
     values = data.model_dump(exclude_none=True)
     if "draw_weights" in values:
         values["draw_weights"] = {**defaults["draw_weights"], **values["draw_weights"]}
-    group = FootballGroup(**{**defaults, **values}, invite_token=_new_token(), created_by_id=actor.id)
+    group = FootballGroup(**{**defaults, **values}, invite_token=_new_invite_code(db), created_by_id=actor.id)
     if group.public_ranking_enabled:
         group.public_token = _new_token()
     db.add(group)
@@ -110,7 +119,7 @@ def update_group(db: Session, group: FootballGroup, data: GroupUpdate, actor: Us
 
 
 def rotate_invite(db: Session, group: FootballGroup, actor: User) -> FootballGroup:
-    group.invite_token = _new_token()
+    group.invite_token = _new_invite_code(db)
     audit.record(db, action="group.invite_rotated", entity_type="group", entity_id=group.id,
                  actor_user_id=actor.id, group_id=group.id)
     db.commit()
@@ -203,8 +212,13 @@ def _join(
     return member
 
 
+def find_by_invite(db: Session, token: str) -> FootballGroup | None:
+    """Acha o grupo pelo código do convite (curto, sem diferenciar maiúsculas) ou pelo token longo antigo."""
+    return db.scalar(select(FootballGroup).where(FootballGroup.invite_token.in_([token, token.upper()])))
+
+
 def join_by_token(db: Session, user: User, token: str) -> GroupMember:
-    group = db.scalar(select(FootballGroup).where(FootballGroup.invite_token == token))
+    group = find_by_invite(db, token)
     if group is None or not group.is_active:
         raise NotFound("Convite inválido ou expirado", code="invalid_invite")
     member = _join(db, user, group, needs_approval=group.require_join_approval, action="member.joined_by_invite",

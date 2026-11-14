@@ -241,7 +241,7 @@ def match_detail(db: Session, match_id: int, user: User | None) -> dict:
 
 
 def invite_preview(db: Session, token: str, user: User | None) -> dict:
-    group = db.scalar(select(FootballGroup).where(FootballGroup.invite_token == token))
+    group = groups.find_by_invite(db, token)
     if group is None or not group.is_active or group.suspended_at is not None:
         raise NotFound("Convite inválido ou expirado", code="invalid_invite")
     # próxima pelada publicada (mesmo que o grupo não esteja na descoberta: quem tem o convite foi chamado)

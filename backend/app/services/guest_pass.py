@@ -15,9 +15,9 @@ from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
 from app.core.errors import BusinessRuleError, Forbidden, NotFound
-from app.core.security import create_scoped_token, decode_scoped_token
+from app.core.security import create_scoped_token, decode_scoped_token, short_code
 from app.domain.enums import AttendanceStatus, MatchStatus, MemberStatus, NotificationType
-from app.models import FootballGroup, GroupMember, Match, Payment
+from app.models import FootballGroup, GroupMember, Match, MatchGuestLink, Payment
 from app.services import attendance, draws, games, guests, matches, notifications, payments
 from app.services.access import get_group
 
@@ -26,8 +26,30 @@ PASS_KIND = "guest_pass"
 PASS_GRACE = timedelta(days=30)  # o passe segue valendo depois da pelada, para o convidado ver a cobrança
 
 
-def invite_token(match: Match, sharer: GroupMember) -> str:
-    return create_scoped_token(LINK_KIND, {"mid": match.id, "sid": sharer.id}, match.starts_at)
+def invite_token(db: Session, match: Match, sharer: GroupMember) -> str:
+    """Código curto (8 caracteres) do link de convidado: um por pelada e por quem compartilha."""
+    link = db.scalar(select(MatchGuestLink).where(
+        MatchGuestLink.match_id == match.id, MatchGuestLink.sharer_member_id == sharer.id))
+    if link is None:
+        while True:
+            code = short_code(8)
+            if db.scalar(select(MatchGuestLink.id).where(MatchGuestLink.code == code)) is None:
+                break
+        link = MatchGuestLink(code=code, match_id=match.id, sharer_member_id=sharer.id)
+        db.add(link)
+        db.commit()
+    return link.code
+
+
+def _link_ids(db: Session, token: str) -> tuple[int, int]:
+    """Pelada e quem compartilhou, pelo código curto ou pelo token assinado dos links antigos."""
+    link = db.scalar(select(MatchGuestLink).where(MatchGuestLink.code == token.upper()))
+    if link is not None:
+        return link.match_id, link.sharer_member_id
+    claims = decode_scoped_token(LINK_KIND, token)
+    if claims is None:
+        raise _invalid()
+    return claims["mid"], claims["sid"]
 
 
 def _pass_token(match: Match, guest: GroupMember) -> str:
@@ -39,11 +61,9 @@ def _invalid(msg: str = "Link inválido ou expirado") -> NotFound:
 
 
 def _link_context(db: Session, token: str) -> tuple[Match, FootballGroup, GroupMember]:
-    claims = decode_scoped_token(LINK_KIND, token)
-    if claims is None:
-        raise _invalid()
-    match = db.get(Match, claims["mid"])
-    sharer = db.get(GroupMember, claims["sid"])
+    match_id, sharer_id = _link_ids(db, token)
+    match = db.get(Match, match_id)
+    sharer = db.get(GroupMember, sharer_id)
     if match is None or sharer is None or sharer.group_id != match.group_id or sharer.status != MemberStatus.ACTIVE:
         raise _invalid()
     group = get_group(db, match.group_id)

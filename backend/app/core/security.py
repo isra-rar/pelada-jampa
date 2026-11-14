@@ -1,3 +1,4 @@
+import secrets
 from datetime import timedelta
 
 import bcrypt
@@ -71,3 +72,11 @@ def decode_scoped_token(kind: str, token: str) -> dict | None:
     if payload.get("type") != kind or int(payload["exp"]) <= int(utcnow().timestamp()):
         return None
     return payload
+
+
+_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # sem 0/O/1/I/L: dá para ditar por telefone
+
+
+def short_code(length: int = 8) -> str:
+    """Código curto e fácil de ler para links de convite (o acesso é decidido pelo servidor, não pelo código)."""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(length))

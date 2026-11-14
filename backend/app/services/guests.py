@@ -27,7 +27,7 @@ from app.domain.enums import (
     RatingKind,
 )
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, User
-from app.services import attendance, audit, level_quiz, notifications, platform, ratings
+from app.services import attendance, audit, level_quiz, match_lock, notifications, platform, ratings
 from app.services.users import GUEST_EMAIL_DOMAIN
 
 def _guest_email() -> str:
@@ -188,6 +188,8 @@ def add_to_match(
     """Coloca o convidado na pelada: ocupa vaga como qualquer jogador ou entra na lista de espera."""
     _require_manager(guest, actor)
     _require_open(match)
+    if not actor.is_admin:
+        match_lock.require_unlocked(db, match)
     warnings: list[str] = []
     mp = attendance.get_participation(db, match, guest.id)
     if mp is not None and mp.status in (AttendanceStatus.CONFIRMED, AttendanceStatus.WAITLIST):

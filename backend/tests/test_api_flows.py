@@ -255,7 +255,9 @@ def test_full_flow_presence_evaluation_rating_payments(apiclient, clock, db):
 
     hist = api.get(f"{G}/{gid}/players/{ids[0]}/rating-history", players[0])
     assert [h["reason"] for h in hist["items"]] == ["match", "initial"]
-    api.get(f"{G}/{gid}/players/{ids[0]}/rating-history", players[1], 403)
+    # evolução aberta a todos os membros do grupo
+    other = api.get(f"{G}/{gid}/players/{ids[0]}/rating-history", players[1])
+    assert [h["reason"] for h in other["items"]] == ["match", "initial"]
 
     received = api.get(f"/matches/{mid}/evaluations/received/{ids[0]}", players[0])
     assert received["count"] == 2 and "evaluator" not in str(received)

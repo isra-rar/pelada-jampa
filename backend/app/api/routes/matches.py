@@ -15,13 +15,14 @@ from app.schemas.match import (
     MatchOut,
     MatchPlayerOut,
     MatchUpdate,
+    PendingEvaluationOut,
     PresenceIn,
     PresenceOut,
     SeriesCreate,
     SeriesOut,
     SeriesUpdate,
 )
-from app.services import attendance, matches, payments
+from app.services import attendance, evaluations, matches, payments
 from app.services.access import get_group, match_for_admin, match_for_member, require_admin, require_member
 
 router = APIRouter(tags=["Peladas e presença"])
@@ -143,6 +144,14 @@ def my_debts(match_id: int, user: CurrentUser, db: DB):
     """Pendências anteriores exibidas antes de confirmar (PRD §8.3)."""
     match, member = match_for_member(db, match_id, user)
     return [payments.debt_out(p) for p in payments.pending_debts(db, match.group_id, member.id, match.id)]
+
+
+@router.get("/matches/{match_id}/my-pending-evaluations", response_model=list[PendingEvaluationOut])
+def my_pending_evaluations(match_id: int, user: CurrentUser, db: DB):
+    """Avaliações que o jogador deixou de fazer em peladas anteriores: o app avisa antes de confirmar,
+    e o jogador escolhe avaliar agora ou ignorar (não bloqueia a confirmação)."""
+    match, member = match_for_member(db, match_id, user)
+    return evaluations.pending_for_member(db, member, exclude_match_id=match.id)
 
 
 @router.post("/matches/{match_id}/confirm", response_model=ConfirmOut)

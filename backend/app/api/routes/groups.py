@@ -345,13 +345,9 @@ def player_profile(group_id: int, member_id: int, user: CurrentUser, db: DB):
 @router.get("/groups/{group_id}/players/{member_id}/rating-history", response_model=Page[RatingHistoryOut])
 def rating_history(group_id: int, member_id: int, user: CurrentUser, db: DB, paging: Paging,
                    kind: RatingKind | None = None):
-    """Evolução dos atributos. Disponível ao próprio jogador e aos administradores (auditoria)."""
-    me = require_member(db, group_id, user)
+    """Evolução dos atributos. Qualquer membro do grupo vê a de qualquer jogador (gráfico de evolução)."""
+    require_member(db, group_id, user)
     member = get_member_in_group(db, group_id, member_id)
-    if not (me.is_admin or me.id == member.id):
-        from app.core.errors import Forbidden
-
-        raise Forbidden("Histórico detalhado disponível apenas para o próprio jogador e administradores")
     items, total = ratings.history(db, member.id, kind, paging.page, paging.size)
     return page_of(items, total, paging)
 

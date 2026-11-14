@@ -21,7 +21,7 @@ from app.domain.enums import (
 from app.domain import money
 from app.models import FootballGroup, GroupMember, Match, MatchPlayer, Payment, User
 from app.schemas.match import AdminParticipationIn, PresenceIn
-from app.services import audit, notifications, payments
+from app.services import audit, match_lock, notifications, payments
 from app.services.access import get_member_in_group
 from app.services.groups import group_admin_user_ids
 
@@ -200,6 +200,7 @@ def confirm(
     as_referee: bool = False,
 ):
     _require_open_for_players(match)
+    match_lock.require_unlocked(db, match)
     if _now() > match.confirmation_deadline:
         raise BusinessRuleError("O prazo de confirmação terminou", code="confirmation_closed")
     mp = _get_or_create(db, match, member)
@@ -527,7 +528,11 @@ def register_presence(db: Session, group: FootballGroup, match: Match, data: Pre
     if unmarked:
         warnings.append(f"{len(unmarked)} jogador(es) confirmado(s) ainda sem presença registrada")
 
+    was_open = match.status == MatchStatus.PUBLISHED
     match.status = MatchStatus.FINISHED
+    if was_open:
+        db.flush()
+        match_lock.notify_next_opened(db, group, match)
     if data.ended_at is not None:
         match.ended_at = data.ended_at
     elif match.ended_at is None:

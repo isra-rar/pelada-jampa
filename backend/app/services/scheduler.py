@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.db import SessionLocal, utcnow
 from app.domain.enums import AttendanceStatus, MatchStatus, NotificationType
 from app.models import FootballGroup, Match, MatchPlayer
-from app.services import attendance, evaluations, level_quiz, matches, notifications, payments, pros, venue_finance
+from app.services import attendance, evaluations, level_quiz, match_lock, matches, notifications, payments, pros, venue_finance
 
 log = logging.getLogger("pelada.scheduler")
 
@@ -38,6 +38,8 @@ def send_confirmation_reminders(db: Session) -> int:
     ).all()
     sent = 0
     for match in due:
+        if match_lock.blocking_match(db, match) is not None:
+            continue  # travada atrás de outra pelada: o lembrete sai quando ela abrir e o prazo chegar
         users = [
             mp.member.user_id
             for mp in db.scalars(

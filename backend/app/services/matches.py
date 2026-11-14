@@ -31,7 +31,7 @@ from app.schemas.match import (
     check_expansion,
 )
 from app.domain import money
-from app.services import audit, notifications, venue_finance, venues
+from app.services import audit, match_lock, notifications, venue_finance, venues
 from app.services.groups import group_admin_user_ids
 
 DEFAULT_CONFIRMATION_HOURS = 2
@@ -188,13 +188,16 @@ def publish_match(db: Session, group: FootballGroup, match: Match, actor: User, 
     for m in members:
         if m.id not in existing:
             db.add(MatchPlayer(match_id=match.id, member_id=m.id, status=AttendanceStatus.PENDING))
-    when = notifications.when(match.starts_at)
-    notifications.notify(
-        db, [m.user_id for m in members], NotificationType.MATCH_CREATED, f"Nova pelada: {match.name}",
-        f"{when} em {match.location}. Confirme sua presença até "
-        f"{notifications.when(match.confirmation_deadline)}.",
-        group_id=group.id, match_id=match.id,
-    )
+    db.flush()
+    # travada atrás de outra pelada em aberto: o aviso sai quando as confirmações abrirem
+    if match_lock.blocking_match(db, match) is None:
+        when = notifications.when(match.starts_at)
+        notifications.notify(
+            db, [m.user_id for m in members], NotificationType.MATCH_CREATED, f"Nova pelada: {match.name}",
+            f"{when} em {match.location}. Confirme sua presença até "
+            f"{notifications.when(match.confirmation_deadline)}.",
+            group_id=group.id, match_id=match.id,
+        )
     audit.record(db, action="match.published", entity_type="match", entity_id=match.id, actor_user_id=actor.id,
                  group_id=group.id)
     if commit:
@@ -270,6 +273,7 @@ def cancel_match(db: Session, group: FootballGroup, match: Match, reason: str | 
                          match_id=match.id)
     audit.record(db, action="match.cancelled", entity_type="match", entity_id=match.id, actor_user_id=actor.id,
                  group_id=group.id, reason=reason)
+    match_lock.notify_next_opened(db, group, match)
     db.commit()
     return match
 
@@ -388,6 +392,9 @@ def match_out(db: Session, match: Match, member: GroupMember | None = None) -> d
     data["counts"] = attendance_counts(db, match)
     data["cost"] = cost_out(db, match)
     data["hire_cost"] = data["cost"]["goalkeepers"] + data["cost"]["referees"]
+    previous = match_lock.blocking_match(db, match)
+    data["opens_after_match_id"] = previous.id if previous else None
+    data["opens_after_starts_at"] = previous.starts_at if previous else None
     if member is not None:
         data["my_status"] = db.scalar(
             select(MatchPlayer.status).where(MatchPlayer.match_id == match.id, MatchPlayer.member_id == member.id)

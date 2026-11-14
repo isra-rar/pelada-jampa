@@ -18,7 +18,7 @@ from app.core.errors import BusinessRuleError, Forbidden, NotFound
 from app.core.security import create_scoped_token, decode_scoped_token, short_code
 from app.domain.enums import AttendanceStatus, MatchStatus, MemberStatus, NotificationType
 from app.models import FootballGroup, GroupMember, Match, MatchGuestLink, Payment
-from app.services import attendance, draws, games, guests, matches, notifications, payments
+from app.services import attendance, draws, games, guests, match_lock, matches, notifications, payments
 from app.services.access import get_group
 
 LINK_KIND = "match_invite"
@@ -84,7 +84,7 @@ def _pass_context(db: Session, token: str) -> tuple[Match, FootballGroup, GroupM
     return match, get_group(db, match.group_id), guest
 
 
-def _open_state(match: Match) -> tuple[bool, str | None]:
+def _open_state(db: Session, match: Match) -> tuple[bool, str | None]:
     if match.status != MatchStatus.PUBLISHED:
         return False, "Esta pelada não está aberta para confirmações"
     now = utcnow()
@@ -92,6 +92,9 @@ def _open_state(match: Match) -> tuple[bool, str | None]:
         return False, "A pelada já começou"
     if now > match.confirmation_deadline:
         return False, "O prazo de confirmação terminou"
+    previous = match_lock.blocking_match(db, match)
+    if previous is not None:
+        return False, match_lock.locked_message(previous)
     return True, None
 
 
@@ -109,14 +112,14 @@ def _match_card(db: Session, match: Match, group: FootballGroup) -> dict:
 
 def link_preview(db: Session, token: str) -> dict:
     match, group, sharer = _link_context(db, token)
-    open_, reason = _open_state(match)
+    open_, reason = _open_state(db, match)
     return {"match": _match_card(db, match, group), "invited_by_name": sharer.display_name,
             "can_join": open_, "closed_reason": reason}
 
 
 def join(db: Session, token: str, name: str, stars: int, goalkeeper: bool) -> dict:
     match, group, sharer = _link_context(db, token)
-    open_, reason = _open_state(match)
+    open_, reason = _open_state(db, match)
     if not open_:
         raise BusinessRuleError(reason, code="match_not_open")
     guest = guests.create_guest(db, group, sharer, name, stars, goalkeeper, self_joined=True)
@@ -161,7 +164,7 @@ def view(db: Session, token: str) -> dict:
         for r in attendance.list_participants(db, match, admin=False) if r["status"] in shown
     ]
     position = next((p["waitlist_position"] for p in participants if p["is_me"]), None)
-    open_, _ = _open_state(match)
+    open_, _ = _open_state(db, match)
     return {
         "match": _match_card(db, match, group),
         "me": {"name": guest.display_name, "invited_by_name": guest.invited_by.display_name,

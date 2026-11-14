@@ -371,6 +371,33 @@ def send_closing_reminders(db: Session) -> int:
     return sent
 
 
+def pending_for_member(db: Session, member: GroupMember, exclude_match_id: int | None = None) -> list[dict]:
+    """Peladas com janela de avaliação aberta em que o jogador jogou e ainda falta avaliar colegas
+    (mais recente primeiro). Serve para lembrar, nunca para bloquear a confirmação na próxima."""
+    open_matches = db.scalars(
+        select(Match)
+        .join(MatchPlayer, MatchPlayer.match_id == Match.id)
+        .where(
+            Match.group_id == member.group_id,
+            Match.evaluation_status == EvaluationStatus.OPEN,
+            Match.evaluation_closes_at > utcnow(),
+            MatchPlayer.member_id == member.id,
+            MatchPlayer.status == AttendanceStatus.PRESENT,
+        )
+        .order_by(Match.starts_at.desc())
+    ).all()
+    out = []
+    for match in open_matches:
+        if match.id == exclude_match_id:
+            continue
+        present = _present(db, match)
+        remaining = max(0, len(present) - 1 - len(_evaluated_by(db, match.id, member.id)))
+        if remaining:
+            out.append({"match_id": match.id, "match_name": match.name, "starts_at": match.starts_at,
+                        "remaining": remaining, "closes_at": match.evaluation_closes_at})
+    return out
+
+
 def pending_count_for_member(db: Session, member: GroupMember) -> int:
     """Quantas avaliações o jogador ainda pode fazer em janelas abertas."""
     open_matches = db.scalars(

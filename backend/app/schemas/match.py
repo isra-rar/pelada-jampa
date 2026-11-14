@@ -167,6 +167,9 @@ class MatchOut(ORMModel):
     cancel_reason: str | None
     counts: AttendanceCounts | None = None
     my_status: AttendanceStatus | None = None
+    # pelada travada: só abre confirmações quando a anterior do grupo encerrar
+    opens_after_match_id: int | None = None
+    opens_after_starts_at: datetime | None = None
     # soma dos goleiros/juízes contratados (aceitos): rateada entre os jogadores presentes na cobrança
     hire_cost: Decimal = Decimal("0")
     cost: "MatchCost | None" = None
@@ -318,6 +321,16 @@ class ConfirmIn(BaseModel):
         if self.as_goalkeeper and self.as_referee:
             raise ValueError("Escolha goleiro ou juiz, não os dois")
         return self
+
+
+class PendingEvaluationOut(BaseModel):
+    """Pelada anterior que o jogador ainda não terminou de avaliar (aviso antes de confirmar a próxima)."""
+
+    match_id: int
+    match_name: str
+    starts_at: datetime
+    remaining: int
+    closes_at: datetime | None
 
 
 class ConfirmOut(BaseModel):

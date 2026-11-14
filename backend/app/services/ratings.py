@@ -131,6 +131,15 @@ def set_provisional(
     rating.stars = R.compute_stars(rating.average, platform.star_thresholds(db))
     rating.updated_at = utcnow()
     rating.initial_confirmed = True
+    # nota inicial salva pelo admin também confirma o nível pendente do quiz (some a marca "confirmar nível").
+    # Quem se avalia sozinho com outro admin no grupo continua dependendo da confirmação do outro
+    if member.self_assessed_at is not None and member.level_reviewed_at is None:
+        from app.services import level_quiz  # import local: level_quiz depende deste módulo
+
+        others = [uid for uid in level_quiz.active_admin_ids(db, group.id) if uid != actor_user_id]
+        if member.user_id != actor_user_id or not others:
+            member.confirmed_stars = rating.stars
+            member.level_reviewed_at = utcnow()
     record_history(db, rating, reason="admin_provisional", before=before, avg_before=avg_before,
                    stars_before=stars_before, actor_user_id=actor_user_id)
     audit.record(

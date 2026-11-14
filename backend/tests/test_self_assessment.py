@@ -304,3 +304,16 @@ def test_export_and_account_deletion_cover_quiz(apiclient, db):
     api.post("/me/delete", players[0], json={"password": "senha-segura", "confirm": "EXCLUIR"})
     db.expire_all()
     assert db.get(GroupMember, mid).self_assessment is None
+
+
+def test_admin_initial_rating_also_clears_level_to_review(apiclient):
+    api = apiclient
+    admin, group, players = setup_group(api, 1)
+    gid, mid = group["id"], players[0]["_member_id"]
+    api.post(f"{G}/{gid}/self-assessment", players[0], json=quiz(ALL_TOP, declared=4))
+    assert api.get(f"{G}/{gid}/dashboard", admin)["levels_to_review"] == 1
+    api.put(f"{G}/{gid}/players/{mid}/provisional-rating", admin,
+            json={"attributes": {k: 3.5 for k in ALL_TOP}})
+    row = next(m for m in api.get(f"{G}/{gid}/members", admin) if m["id"] == mid)
+    assert row["self_assessment"]["status"] == "confirmed"  # some a marca "confirmar nível"
+    assert api.get(f"{G}/{gid}/dashboard", admin)["levels_to_review"] == 0
